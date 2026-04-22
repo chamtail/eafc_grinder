@@ -63,6 +63,13 @@
       87: { name: "Team of the Season", class: "rarity-tots" },
     },
 
+    // SBC 稀有度分组映射 (key 25 PLAYER_RARITY_GROUP 的 value → rareflag 列表)
+    rarityGroupMap: {
+      4: [1],           // Rare
+      44: [2, 22, 87],  // TOTW / TOTS / TOTS
+      // 更多分组待补充
+    },
+
     // 联赛映射表
     leagueMap: {
       13: "英超",
@@ -499,7 +506,7 @@
     },
 
     // 通用：从 repository 读取球员
-    _parseRepositoryPlayers(repository) {
+    _parseRepositoryPlayers(repository, isStorage = false) {
       const players = [];
       if (!repository) return players;
 
@@ -510,7 +517,7 @@
         for (let i = 0; i < coll.length; i++) {
           const item = coll[i];
           if (item && item.isPlayer && item.isPlayer()) {
-            players.push(this._parsePlayerItem(item));
+            players.push(this._parsePlayerItem(item, isStorage));
           }
         }
         if (players.length > 0) return players;
@@ -522,7 +529,7 @@
           for (let i = 0; i < collection.length; i++) {
             const item = collection[i];
             if (item && item.isPlayer && item.isPlayer()) {
-              players.push(this._parsePlayerItem(item));
+              players.push(this._parsePlayerItem(item, isStorage));
             }
           }
           if (players.length > 0) return players;
@@ -541,13 +548,13 @@
 
     // 获取重复仓库球员列表
     getStoragePlayers() {
-      const players = this._parseRepositoryPlayers(repositories.Item.storage);
+      const players = this._parseRepositoryPlayers(repositories.Item.storage, true);
       players.sort((a, b) => b.rating - a.rating);
       return players;
     },
 
     // 解析球员项为统一格式
-    _parsePlayerItem(item) {
+    _parsePlayerItem(item, isStorage = false) {
       let name = "Unknown";
       let staticData = null;
 
@@ -596,6 +603,8 @@
         acceleRate: item.acceleRate || 0,
         itemTypeId: item.itemTypeId,
         pile: item.pile,
+        isStorage: isStorage,
+        metaDataId: item._metaData?.id || 0,
         timestamp: Date.now(),
         _item: item,
       };
@@ -1141,9 +1150,23 @@
       if (reqs.minChemistry > 0) {
         reqText += `\n最低默契: ${reqs.minChemistry}\n`;
       }
-      if (reqs.minRare > 0) {
-        reqText += `最低稀有球员数: ${reqs.minRare}\n`;
+      if (reqs.globalQuality > 0) {
+        const qName = reqs.globalQuality === 1 ? '铜卡' : reqs.globalQuality === 2 ? '银卡' : '金卡';
+        reqText += `全队卡片等级: ${qName}\n`;
       }
+      if (reqs.minRareCount > 0) {
+        const groupFlags = this.rarityGroupMap[reqs.minRarityGroup] || [reqs.minRarityGroup];
+        const names = groupFlags.map(f => this.getRarityName(f).name).join('/');
+        reqText += `至少 ${reqs.minRareCount} 名 ${names} 球员\n`;
+      }
+      if (reqs.minTeamRating > 0) {
+        reqText += `阵容平均评分: ≥${reqs.minTeamRating}\n`;
+      }
+      if (reqs.sameNationCount > 0) reqText += `同国籍球员: ≥${reqs.sameNationCount}\n`;
+      if (reqs.sameLeagueCount > 0) reqText += `同联赛球员: ≥${reqs.sameLeagueCount}\n`;
+      if (reqs.sameClubCount > 0) reqText += `同俱乐部球员: ≥${reqs.sameClubCount}\n`;
+      if (reqs.legendCount > 0) reqText += `Icon/Legend 球员: ≥${reqs.legendCount}\n`;
+      if (reqs.firstOwnerCount > 0) reqText += `首发球员数: ≥${reqs.firstOwnerCount}\n`;
 
       // 计算锁定的位置
       const brickIndices = controller._squad?.getAllBrickIndices ? controller._squad.getAllBrickIndices() : [];
@@ -1228,18 +1251,24 @@
 
         // 解析 SBC 需求
         const squadRequirements = this.parseSBCRequirements(requirements);
-        console.log("[EAFC Grinder] SBC 需求解析完成:", squadRequirements);
+
+        // 从 formation 计算实际需要填充的球员数（总槽位 - 锁定槽位）
+        try {
+          const formation = controller._challenge.formation;
+          const formationData = repositories.Squad.getFormation(formation);
+          const brickIndices = controller._squad.getAllBrickIndices ? controller._squad.getAllBrickIndices() : [];
+          squadRequirements.minPlayers = formationData.generalPositions.length - brickIndices.length;
+        } catch(e) {}
 
         // 从球员数据库中筛选符合条件的球员
         const eligiblePlayers = this.filterEligiblePlayers(squadRequirements);
-        console.log(`[EAFC Grinder] 找到 ${eligiblePlayers.length} 名符合条件的球员`);
 
         // 选择最优阵容（评分最低但符合条件）
         const optimalSquad = this.selectOptimalSquad(eligiblePlayers, squadRequirements);
-        console.log(`[EAFC Grinder] 选择最优阵容 ${optimalSquad.length} 名球员`);
 
         // 计算需要的球员数
-        const requiredCount = squadRequirements.ratingRanges.reduce((sum, r) => sum + r.count, 0) || squadRequirements.minPlayers;
+        const ratingRangesTotal = squadRequirements.ratingRanges.reduce((sum, r) => sum + r.count, 0);
+        const requiredCount = ratingRangesTotal > 0 ? ratingRangesTotal : squadRequirements.minPlayers;
 
         if (optimalSquad.length < requiredCount) {
           alert(`❌ 俱乐部中没有足够的球员满足 SBC 需求\n\n需要: ${requiredCount} 名\n可用: ${optimalSquad.length} 名`);
@@ -1278,8 +1307,21 @@
         minPlayers: 0,
         minRating: 0,
         maxRating: 999,
-        minChemistry: 0,
+        minChemistry: 0,          // key 35: CHEMISTRY_POINTS
         minRare: 0,
+        minRareCount: 0,          // key 25: PLAYER_RARITY_GROUP - 至少 count 名 rarityGroup === value 的球员
+        minRarityGroup: null,     // key 25: rarityGroup 精确值
+        minTeamRating: 0,         // key 19: TEAM_RATING - 阵容平均评分下限
+        globalQuality: 0,         // key 3:  PLAYER_QUALITY - 全队卡片等级 (1=铜, 2=银, 3=金)
+        sameNationCount: 0,       // key 4:  SAME_NATION_COUNT
+        sameLeagueCount: 0,       // key 5:  SAME_LEAGUE_COUNT
+        sameClubCount: 0,         // key 6:  SAME_CLUB_COUNT
+        nationCount: 0,           // key 7:  NATION_COUNT
+        leagueCount: 0,           // key 8:  LEAGUE_COUNT
+        clubCount: 0,             // key 9:  CLUB_COUNT
+        legendCount: 0,           // key 15: LEGEND_COUNT
+        firstOwnerCount: 0,       // key 30: FIRST_OWNER_PLAYERS_COUNT
+        tradability: null,        // key 33: PLAYER_TRADABILITY
         requiredPositions: [],
         requiredLeague: null,
         requiredNation: null,
@@ -1289,16 +1331,16 @@
 
       if (!requirements || requirements.length === 0) return reqs;
 
-      // 每个 requirements 数组元素都是一个独立的需求组
-      requirements.forEach((req, index) => {
+      requirements.forEach((req) => {
         try {
-          const count = req.count || 0;
+          const count = req.count;
           const collection = req.kvPairs && req.kvPairs._collection ? req.kvPairs._collection : {};
           const keys = Object.keys(collection);
 
           if (keys.length === 0) return;
 
-          const slot = { count: count, minRating: 0, maxRating: 999 };
+          let isGlobal = count === -1;
+          const slot = { count: count, min: 0, max: 999 };
 
           keys.forEach(key => {
             const numKey = parseInt(key, 10);
@@ -1306,41 +1348,101 @@
             const firstValue = Array.isArray(value) ? value[0] : value;
 
             switch (numKey) {
-              case 26: // PLAYER_MIN_OVR
-                slot.minRating = firstValue;
+              case 2:  // PLAYER_COUNT - 阵容球员总数（全局）
+                isGlobal = true;
                 break;
-              case 28: // PLAYER_MAX_OVR
-                slot.maxRating = firstValue;
+              case 3:  // PLAYER_QUALITY 全局卡片等级 (1=铜, 2=银, 3=金)
+                reqs.globalQuality = firstValue;
+                isGlobal = true;
                 break;
-              case 19: // TEAM_RATING
-                reqs.minRating = firstValue || 0;
+              case 4:  // SAME_NATION_COUNT
+                reqs.sameNationCount = firstValue;
+                isGlobal = true;
                 break;
-              case 35: // CHEMISTRY_POINTS
-                reqs.minChemistry = firstValue || 0;
+              case 5:  // SAME_LEAGUE_COUNT
+                reqs.sameLeagueCount = firstValue;
+                isGlobal = true;
                 break;
-              case 18: // PLAYER_RARITY (0=Common, 1=Rare, 2+=特殊卡)
-                slot.minRare = firstValue;
+              case 6:  // SAME_CLUB_COUNT
+                reqs.sameClubCount = firstValue;
+                isGlobal = true;
                 break;
-              case 17: // PLAYER_QUALITY (1=Bronze, 2=Silver, 3=Gold)
-                slot.quality = firstValue;
+              case 7:  // NATION_COUNT
+                reqs.nationCount = firstValue;
+                isGlobal = true;
                 break;
-              case 11: // LEAGUE_ID
-                slot.league = firstValue;
+              case 8:  // LEAGUE_COUNT
+                reqs.leagueCount = firstValue;
+                isGlobal = true;
+                break;
+              case 9:  // CLUB_COUNT
+                reqs.clubCount = firstValue;
+                isGlobal = true;
                 break;
               case 10: // NATION_ID
                 slot.nation = firstValue;
                 break;
+              case 11: // LEAGUE_ID
+                slot.league = firstValue;
+                break;
               case 12: // CLUB_ID
                 slot.club = firstValue;
+                break;
+              case 13: // SCOPE（全局标记）
+                isGlobal = true;
+                break;
+              case 15: // LEGEND_COUNT
+                reqs.legendCount = firstValue;
+                isGlobal = true;
+                break;
+              case 17: // PLAYER_LEVEL / PLAYER_QUALITY (1=铜, 2=银, 3=金)
+                slot.quality = firstValue;
+                break;
+              case 18: // PLAYER_RARITY
+                slot.minRare = firstValue;
+                break;
+              case 19: // TEAM_RATING 阵容平均评分下限
+                reqs.minTeamRating = firstValue || 0;
+                isGlobal = true;
+                break;
+              case 25: // PLAYER_RARITY_GROUP: count 名 rarityGroup === firstValue 的球员
+                reqs.minRareCount = count > 0 ? count : 1;
+                reqs.minRarityGroup = firstValue;
+                isGlobal = true;
+                break;
+              case 26: // PLAYER_MIN_OVR
+                slot.min = firstValue;
+                break;
+              case 27: // PLAYER_EXACT_OVR
+                slot.min = firstValue;
+                slot.max = firstValue;
+                break;
+              case 28: // PLAYER_MAX_OVR
+                slot.max = firstValue;
+                break;
+              case 30: // FIRST_OWNER_PLAYERS_COUNT
+                reqs.firstOwnerCount = firstValue;
+                isGlobal = true;
+                break;
+              case 33: // PLAYER_TRADABILITY
+                reqs.tradability = firstValue;
+                isGlobal = true;
+                break;
+              case 35: // CHEMISTRY_POINTS
+                reqs.minChemistry = firstValue || 0;
+                isGlobal = true;
+                break;
+              case 36: // ALL_PLAYERS_CHEMISTRY_POINTS（暂不处理）
+                isGlobal = true;
                 break;
             }
           });
 
-          if (slot.count > 0) {
+          if (!isGlobal && slot.count > 0) {
             reqs.ratingRanges.push(slot);
           }
         } catch (e) {
-          console.warn(`[EAFC Grinder] 解析需求 ${index} 时出错:`, e);
+          // 解析单条需求失败，跳过
         }
       });
 
@@ -1370,6 +1472,17 @@
         return true;
       });
 
+      // 应用全局卡片等级约束
+      if (requirements.globalQuality) {
+        if (requirements.globalQuality === 1) {
+          eligible = eligible.filter(p => p.rating <= 64);
+        } else if (requirements.globalQuality === 2) {
+          eligible = eligible.filter(p => p.rating >= 65 && p.rating <= 74);
+        } else if (requirements.globalQuality === 3) {
+          eligible = eligible.filter(p => p.rating >= 75);
+        }
+      }
+
       // 如果没有评分范围需求，使用简单的全局过滤
       if (requirements.ratingRanges.length === 0) {
         if (requirements.requiredLeague) {
@@ -1393,102 +1506,83 @@
     selectOptimalSquad(eligiblePlayers, requirements) {
       const squad = [];
       const usedPlayerIds = new Set();
+      const usedMetaDataIds = new Set();
 
-      // 排序优先级：不可交易 > 可交易，common(0) > rare(1) > 特殊卡
+      const totalNeeded = requirements.minPlayers || 11;
+
+      // 排序优先级：不可交易 > 可交易，common(0) > rare(1) > 特殊卡，仓库球员优先，评分低的优先
       const sortedPlayers = [...eligiblePlayers].sort((a, b) => {
-        // 不可交易优先
-        if (a.tradable !== b.tradable) {
-          return a.tradable ? 1 : -1;
-        }
-        // common(0) > rare(1) > 特殊卡
-        if (a.rareflag !== b.rareflag) {
-          return a.rareflag - b.rareflag;
-        }
-        // 评分低的优先
+        if (a.tradable !== b.tradable) return a.tradable ? 1 : -1;
+        if (a.rareflag !== b.rareflag) return a.rareflag - b.rareflag;
+        if (a.isStorage !== b.isStorage) return a.isStorage ? -1 : 1;
         return a.rating - b.rating;
       });
 
-      // 如果有需求范围，按照需求选择球员
+      const canPick = (p) => {
+        if (usedPlayerIds.has(p.id)) return false;
+        const mid = p._item?._metaData?.id;
+        if (mid != null && usedMetaDataIds.has(mid)) return false;
+        return true;
+      };
+
+      const pick = (p) => {
+        squad.push(p);
+        usedPlayerIds.add(p.id);
+        const mid = p._item?._metaData?.id;
+        if (mid != null) usedMetaDataIds.add(mid);
+      };
+
+      // 第一步：满足 rarityGroup 需求（先选指定稀有度的球员）
+      if (requirements.minRareCount > 0 && requirements.minRarityGroup !== null) {
+        const targetFlags = this.rarityGroupMap[requirements.minRarityGroup] || [requirements.minRarityGroup];
+        const isInGroup = (p) => targetFlags.includes(p.rareflag);
+        let picked = 0;
+        for (const p of sortedPlayers) {
+          if (picked >= requirements.minRareCount) break;
+          if (!canPick(p)) continue;
+          if (!isInGroup(p)) continue;
+          pick(p);
+          picked++;
+        }
+      }
+
+      // 第二步：满足 ratingRanges 槽位需求
       if (requirements.ratingRanges.length > 0) {
         for (const range of requirements.ratingRanges) {
-          // 根据卡片等级推断评分范围
           let minRating = range.min || 0;
           let maxRating = range.max || 999;
 
-          // 如果指定了 quality，用 quality 的评分范围覆盖
           if (range.quality) {
-            if (range.quality === 1) { minRating = 0; maxRating = 64; }      // 铜卡
-            else if (range.quality === 2) { minRating = 65; maxRating = 74; } // 银卡
-            else if (range.quality === 3) { minRating = 75; maxRating = 99; } // 金卡
+            if (range.quality === 1) { minRating = 0; maxRating = 64; }
+            else if (range.quality === 2) { minRating = 65; maxRating = 74; }
+            else if (range.quality === 3) { minRating = 75; maxRating = 99; }
           }
 
-          console.log(`[EAFC Grinder] 需求组: 评分 ${minRating}-${maxRating}, 卡片等级 ${range.quality || '任意'}, 稀有度 ${range.minRare ?? '任意'}, 数量 ${range.count}`);
-
-          // 筛选符合条件的球员
-          let rangePlayers = sortedPlayers.filter(p =>
-            !usedPlayerIds.has(p.id) &&
-            p.rating >= minRating &&
-            p.rating <= maxRating
-          );
-
-          // 稀有度过滤 (0=Common, 1=Rare)
-          if (range.minRare !== null && range.minRare !== undefined) {
-            rangePlayers = rangePlayers.filter(p => p.rareflag >= range.minRare);
-          }
-
-          // 如果有限制联赛/国籍/俱乐部
-          if (range.league) {
-            rangePlayers = rangePlayers.filter(p => p.leagueId === range.league);
-          }
-          if (range.nation) {
-            rangePlayers = rangePlayers.filter(p => p.nationId === range.nation);
-          }
-          if (range.club) {
-            rangePlayers = rangePlayers.filter(p => p.teamId === range.club);
-          }
-
-          console.log(`[EAFC Grinder] 符合条件球员: ${rangePlayers.length} 名`);
-
-          // 选择排序后的前 N 名球员
-          const selected = rangePlayers.slice(0, range.count);
-          selected.forEach(player => {
-            squad.push(player);
-            usedPlayerIds.add(player.id);
-          });
-
-          const qualityName = range.quality === 1 ? '铜卡' : range.quality === 2 ? '银卡' : range.quality === 3 ? '金卡' : '任意';
-          const rareText = range.minRare === 0 ? 'Common' : range.minRare === 1 ? 'Rare+' : '任意';
-          console.log(`[EAFC Grinder] 已选择 ${selected.length}/${range.count} 名球员: ${qualityName}, 评分 ${minRating}-${maxRating}`);
-        }
-      } else {
-        // 没有评分范围需求，使用默认逻辑
-        const positions = ["GK", "CB", "CB", "CB", "LB", "RB", "CDM", "CDM", "CM", "CM", "ST"];
-
-        for (const pos of positions) {
-          if (squad.length >= requirements.minPlayers) break;
-
-          const posPlayers = sortedPlayers.filter(p =>
-            !usedPlayerIds.has(p.id) &&
-            (p.position === pos || (p.positions && p.positions.includes(pos)))
-          );
-
-          if (posPlayers.length > 0) {
-            const selected = posPlayers[0];
-            squad.push(selected);
-            usedPlayerIds.add(selected.id);
+          let picked = 0;
+          for (const p of sortedPlayers) {
+            if (picked >= range.count) break;
+            if (!canPick(p)) continue;
+            if (p.rating < minRating || p.rating > maxRating) continue;
+            if (range.minRare != null && p.rareflag < range.minRare) continue;
+            if (range.league && p.leagueId !== range.league) continue;
+            if (range.nation && p.nationId !== range.nation) continue;
+            if (range.club && p.teamId !== range.club) continue;
+            pick(p);
+            picked++;
           }
         }
+      }
 
-        // 如果还有空缺，用剩余评分最低的球员填充
-        while (squad.length < requirements.minPlayers && sortedPlayers.length > 0) {
-          const remaining = sortedPlayers.find(p => !usedPlayerIds.has(p.id));
-          if (remaining) {
-            squad.push(remaining);
-            usedPlayerIds.add(remaining.id);
-          } else {
-            break;
-          }
+      // 第三步：填满剩余空缺
+      while (squad.length < totalNeeded) {
+        let found = false;
+        for (const p of sortedPlayers) {
+          if (!canPick(p)) continue;
+          pick(p);
+          found = true;
+          break;
         }
+        if (!found) break;
       }
 
       return squad;
@@ -1536,7 +1630,7 @@
 
         if (playerItem) {
           playerList.push(playerItem);
-          fillLog.push(`位置 ${i + 1}: ${player.name} (OVR: ${player.rating}, ${player.position})`);
+          fillLog.push(`位置 ${i + 1}: ${player.name} (OVR: ${player.rating}, ${player.position}, mid:${player._item?._metaData?.id ?? "?"})`);
           console.log(`[EAFC Grinder] 位置 ${i} 已分配: ${player.name} (${player.rating})`);
           squadIndex++;
         } else {

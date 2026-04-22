@@ -16,10 +16,12 @@
   const EAFCGrinder = {
     initialized: false,
     players: [],
+    storagePlayers: [],
     currentPage: 1,
     pageSize: 50,
     totalPages: 0,
     collapsed: false,
+    currentTab: "club", // "club" or "storage"
     panelPosition: { left: 0, right: 10, top: 60 },
     sbcFillButton: null, // SBC填充按钮
     currentChallenge: null, // 当前SBC挑战
@@ -276,6 +278,45 @@
         max-height: 50px;
         overflow: hidden;
       }
+      .grinder-tabs {
+        display: flex;
+        gap: 5px;
+        margin-bottom: 10px;
+      }
+      .grinder-tab {
+        flex: 1;
+        padding: 6px 12px;
+        background: rgba(59, 71, 84, 0.5);
+        border: none;
+        border-radius: 4px;
+        color: #a4a9b4;
+        font-size: 13px;
+        font-weight: bold;
+        cursor: pointer;
+        text-align: center;
+        transition: all 0.2s;
+        font-family: 'UltimateTeam', sans-serif;
+      }
+      .grinder-tab:hover {
+        background: rgba(59, 71, 84, 0.8);
+        color: #fff;
+      }
+      .grinder-tab.active {
+        background: #36b84b;
+        color: #fff;
+      }
+      .duplicate-badge {
+        display: inline-block;
+        background: #f6b803;
+        color: #000;
+        border-radius: 10px;
+        padding: 1px 6px;
+        font-size: 10px;
+        font-weight: bold;
+        margin-left: 6px;
+        min-width: 18px;
+        text-align: center;
+      }
     `,
 
     init() {
@@ -284,14 +325,15 @@
 
       console.log("[EAFC Grinder] 开始初始化...");
       this.addStyles();
-      this.loadAllClubPlayers();
+      this.loadAllPlayers();
       this.initAutoRefreshListener();
     },
 
     // 监听自动刷新
     initAutoRefreshListener() {
       const self = this;
-      let lastPlayerCount = 0;
+      let lastClubCount = 0;
+      let lastStorageCount = 0;
 
       // 方法1：拦截页面导航事件（切换页面时刷新）
       if (typeof UTGameFlowNavigationController !== 'undefined' && UTGameFlowNavigationController.prototype.pushViewController) {
@@ -303,7 +345,7 @@
         };
       }
 
-      // 方法2：监听 repositories.Item 缓存重置（开包/球员变动时刷新）
+      // 方法2：监听 repositories.Item club 缓存重置
       if (repositories.Item && repositories.Item.club && repositories.Item.club.items) {
         try {
           const originalReset = repositories.Item.club.items.reset;
@@ -317,15 +359,32 @@
         } catch (e) {}
       }
 
-      // 方法3：定时检查球员数量变化（兜底方案）
+      // 方法3：监听 repositories.Item storage 缓存重置
+      if (repositories.Item && repositories.Item.storage && repositories.Item.storage.items) {
+        try {
+          const originalReset = repositories.Item.storage.items.reset;
+          if (originalReset) {
+            repositories.Item.storage.items.reset = function(...args) {
+              const result = originalReset.apply(this, args);
+              setTimeout(() => self.autoRefreshPanel(), 100);
+              return result;
+            };
+          }
+        } catch (e) {}
+      }
+
+      // 方法4：定时检查球员数量变化（兜底方案）
       setInterval(() => {
         try {
-          const currentCount = repositories.Item?.club?.items?.values?.().length || 0;
-          if (currentCount !== lastPlayerCount && lastPlayerCount > 0) {
-            console.log(`[EAFC Grinder] 检测到球员数量变化 (${lastPlayerCount} → ${currentCount})，刷新面板...`);
+          const clubCount = repositories.Item?.club?.items?.values?.().length || 0;
+          const storageCount = repositories.Item?.storage?.items?.values?.().length || 0;
+          if ((clubCount !== lastClubCount && lastClubCount > 0) ||
+              (storageCount !== lastStorageCount && lastStorageCount > 0)) {
+            console.log(`[EAFC Grinder] 检测到球员变化 (俱乐部: ${lastClubCount} → ${clubCount}, 仓库: ${lastStorageCount} → ${storageCount})，刷新面板...`);
             self.autoRefreshPanel();
           }
-          lastPlayerCount = currentCount;
+          lastClubCount = clubCount;
+          lastStorageCount = storageCount;
         } catch (e) {}
       }, 3000);
 
@@ -342,8 +401,8 @@
       }
     },
 
-    // 分页加载所有俱乐部球员（强制 EA 加载全量数据到 repositories.Item）
-    async loadAllClubPlayers() {
+    // 分页加载所有球员（俱乐部 + 重复仓库）
+    async loadAllPlayers() {
       try {
         const current = _appMain?.getRootViewController?.();
         if (!current) {
@@ -351,7 +410,7 @@
           return;
         }
 
-        // 获取球员总数
+        // 获取俱乐部球员总数
         const stats = await new Promise((resolve, reject) => {
           services.Club.getStats().observe(current, (obs, result) => {
             obs.unobserve(current);
@@ -372,7 +431,7 @@
         const totalPlayers = playerStats.count;
         console.log(`[EAFC Grinder] 俱乐部共有 ${totalPlayers} 名球员，开始全量加载...`);
 
-        // 分页加载，每页200人
+        // 分页加载俱乐部球员，每页200人
         const batchSize = 200;
         const totalPages = Math.ceil(totalPlayers / batchSize);
 
@@ -388,7 +447,7 @@
             services.Club.search(criteria).observe(current, (obs, res) => {
               obs.unobserve(current);
               if (res.success && JSUtils.isObject(res.response)) {
-                console.log(`[EAFC Grinder] 已加载第 ${page + 1}/${totalPages} 页 (${res.response.items?.length || 0} 名球员)`);
+                console.log(`[EAFC Grinder] 已加载俱乐部第 ${page + 1}/${totalPages} 页 (${res.response.items?.length || 0} 名球员)`);
                 resolve(res.response);
               } else {
                 reject(new Error("搜索失败"));
@@ -396,11 +455,14 @@
             });
           });
 
-          // 避免请求过快
           await this.wait(0.2, 0.3);
         }
 
-        console.log(`[EAFC Grinder] 全量加载完成，共 ${totalPlayers} 名球员`);
+        console.log(`[EAFC Grinder] 俱乐部加载完成，共 ${totalPlayers} 名球员`);
+
+        // 加载重复仓库（storage pile）
+        await this.loadStoragePlayers();
+
         this.showPlayerPanel();
         this.initSBCFillButton();
 
@@ -409,74 +471,159 @@
       }
     },
 
-    // 获取俱乐部球员列表（直接从 EA 缓存读取）
-    getClubPlayers() {
-      const players = [];
+    // 加载重复仓库球员（初始化时强制 EA 加载 storage 数据）
+    async loadStoragePlayers() {
       try {
-        const clubItems = repositories.Item.club.items.values();
-        clubItems.forEach(item => {
-          if (item.isPlayer && item.isPlayer()) {
-            let name = "Unknown";
-            let staticData = null;
+        const current = _appMain?.getRootViewController?.();
+        if (!current) return;
 
-            // 尝试获取静态数据
-            try {
-              staticData = item.getStaticData ? item.getStaticData() : null;
-              if (staticData) {
-                name = staticData.name || item._commonName || "Unknown";
-              } else if (item.definitionId) {
-                staticData = repositories.Item.getStaticDataByDefId(item.definitionId);
-                if (staticData) {
-                  name = staticData.name || "Unknown";
-                }
-              }
-            } catch (e) {
-              name = item._commonName || "Unknown";
+        console.log("[EAFC Grinder] 正在加载重复仓库...");
+
+        // 使用 services.Item.searchStorageItems 强制 EA 加载 storage 数据到缓存
+        await new Promise((resolve, reject) => {
+          services.Item.searchStorageItems(new UTSearchCriteriaDTO()).observe(current, (obs, res) => {
+            obs.unobserve(current);
+            if (res.success && JSUtils.isObject(res.response)) {
+              resolve(res.response);
+            } else {
+              reject(new Error("搜索失败"));
             }
-
-            players.push({
-              id: item.id,
-              definitionId: item.definitionId,
-              duplicateId: item.duplicateId,
-              name: name,
-              firstName: staticData?.firstName || "",
-              lastName: staticData?.lastName || "",
-              commonName: item._commonName || "",
-              rating: item.rating || item.overallRating || 0,
-              position: item.prefPos || item.position || "",
-              positions: item.basePossiblePositions || item.possiblePositions || [],
-              rareflag: item.rareflag,
-              rarityName: this.getRarityName(item.rareflag).name,
-              leagueId: item.leagueId || 0,
-              leagueName: this.getLeagueName(item.leagueId),
-              nationId: item.nationId || 0,
-              nationName: this.getNationName(item.nationId),
-              teamId: item.teamId || 0,
-              clubName: staticData?.clubName || "",
-              cardAssetId: item.cardAssetId || 0,
-              tradable: item.tradable !== false,
-              weakFoot: item.weakFootAbility || 0,
-              skillMoves: item.skillMoves || 0,
-              height: item.height || 0,
-              weight: item.weight || 0,
-              birthday: staticData?.birthday || 0,
-              traits: item.traits || [],
-              playStyles: item.playStyles || [],
-              acceleRate: item.acceleRate || 0,
-              itemTypeId: item.itemTypeId,
-              pile: item.pile,
-              timestamp: Date.now(),
-              _item: item,
-            });
-          }
+          });
         });
-      } catch (e) {
-        console.error("[EAFC Grinder] 读取俱乐部球员失败:", e);
+
+        const storagePlayers = this.getStoragePlayers();
+        console.log(`[EAFC Grinder] 重复仓库加载完成 (${storagePlayers.length} 名球员)`);
+      } catch (error) {
+        console.warn("[EAFC Grinder] 加载重复仓库时出错:", error);
+      }
+    },
+
+    // 通用：从 repository 读取球员
+    _parseRepositoryPlayers(repository) {
+      const players = [];
+      if (!repository) return players;
+
+      const items = repository.items || repository;
+      const coll = items._collection;
+
+      if (coll && coll.length !== undefined) {
+        for (let i = 0; i < coll.length; i++) {
+          const item = coll[i];
+          if (item && item.isPlayer && item.isPlayer()) {
+            players.push(this._parsePlayerItem(item));
+          }
+        }
+        if (players.length > 0) return players;
       }
 
-      // 按总评降序排序
+      if (items && typeof items.values === 'function') {
+        const collection = items.values();
+        if (collection && collection.length !== undefined) {
+          for (let i = 0; i < collection.length; i++) {
+            const item = collection[i];
+            if (item && item.isPlayer && item.isPlayer()) {
+              players.push(this._parsePlayerItem(item));
+            }
+          }
+          if (players.length > 0) return players;
+        }
+      }
+
+      return players;
+    },
+
+    // 获取俱乐部球员列表
+    getClubPlayers() {
+      const players = this._parseRepositoryPlayers(repositories.Item.club);
       players.sort((a, b) => b.rating - a.rating);
       return players;
+    },
+
+    // 获取重复仓库球员列表
+    getStoragePlayers() {
+      const players = this._parseRepositoryPlayers(repositories.Item.storage);
+      players.sort((a, b) => b.rating - a.rating);
+      return players;
+    },
+
+    // 解析球员项为统一格式
+    _parsePlayerItem(item) {
+      let name = "Unknown";
+      let staticData = null;
+
+      try {
+        staticData = item.getStaticData ? item.getStaticData() : (item._staticData || null);
+        if (staticData) {
+          name = staticData.name || item._commonName || "Unknown";
+        } else if (item.definitionId) {
+          staticData = repositories.Item.getStaticDataByDefId(item.definitionId);
+          if (staticData) {
+            name = staticData.name || "Unknown";
+          }
+        }
+      } catch (e) {
+        name = item._commonName || "Unknown";
+      }
+
+      return {
+        id: item.id,
+        definitionId: item.definitionId,
+        duplicateId: item.duplicateId,
+        name: name,
+        firstName: staticData?.firstName || "",
+        lastName: staticData?.lastName || "",
+        commonName: item._commonName || "",
+        rating: item.rating || item.overallRating || 0,
+        position: item.prefPos || item.position || "",
+        positions: item.basePossiblePositions || item.possiblePositions || [],
+        rareflag: item.rareflag,
+        rarityName: this.getRarityName(item.rareflag).name,
+        leagueId: item.leagueId || 0,
+        leagueName: this.getLeagueName(item.leagueId),
+        nationId: item.nationId || 0,
+        nationName: this.getNationName(item.nationId),
+        teamId: item.teamId || 0,
+        clubName: staticData?.clubName || "",
+        cardAssetId: item.cardAssetId || 0,
+        tradable: item.tradable !== false,
+        weakFoot: item.weakFootAbility || 0,
+        skillMoves: item.skillMoves || 0,
+        height: item.height || 0,
+        weight: item.weight || 0,
+        birthday: staticData?.birthday || 0,
+        traits: item.traits || [],
+        playStyles: item.playStyles || [],
+        acceleRate: item.acceleRate || 0,
+        itemTypeId: item.itemTypeId,
+        pile: item.pile,
+        timestamp: Date.now(),
+        _item: item,
+      };
+    },
+
+    // 统计重复球员（definitionId 出现次数 > 1）
+    getDuplicateStats() {
+      const clubPlayers = this.getClubPlayers();
+      const defIdCount = {};
+      clubPlayers.forEach(p => {
+        if (!defIdCount[p.definitionId]) {
+          defIdCount[p.definitionId] = { count: 0, players: [] };
+        }
+        defIdCount[p.definitionId].count++;
+        defIdCount[p.definitionId].players.push(p);
+      });
+
+      // 只保留重复的
+      const duplicates = Object.entries(defIdCount)
+        .filter(([_, v]) => v.count > 1)
+        .map(([defId, v]) => ({
+          definitionId: parseInt(defId),
+          count: v.count,
+          players: v.players,
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      return duplicates;
     },
 
     addStyles() {
@@ -487,6 +634,14 @@
 
     getRarityName(rareflag) {
       return this.rarityMap[rareflag] || { name: `Other(${rareflag})`, class: "rarity-common" };
+    },
+
+    // 获取卡片等级 (1=Bronze≤64, 2=Silver 65-74, 3=Gold≥75)
+    getCardQuality(player) {
+      const rating = player.rating || 0;
+      if (rating <= 64) return 1;  // 铜卡
+      if (rating <= 74) return 2;  // 银卡
+      return 3;                     // 金卡
     },
 
     getLeagueName(leagueId) {
@@ -514,8 +669,12 @@
       const existing = document.querySelector(".grinder-panel");
       if (existing) existing.remove();
 
-      // 每次渲染时从 EA 缓存获取最新球员
-      this.players = this.getClubPlayers();
+      // 根据当前 tab 获取球员
+      if (this.currentTab === "club") {
+        this.players = this.getClubPlayers();
+      } else {
+        this.players = this.getStoragePlayers();
+      }
       this.totalPages = Math.ceil(this.players.length / this.pageSize);
 
       const panel = document.createElement("div");
@@ -540,15 +699,42 @@
       closeBtn.textContent = "×";
       closeBtn.onclick = () => panel.remove();
 
+      // Tab 切换
+      const tabsContainer = document.createElement("div");
+      tabsContainer.className = "grinder-tabs";
+
+      const clubTab = document.createElement("button");
+      clubTab.className = "grinder-tab" + (this.currentTab === "club" ? " active" : "");
+      clubTab.textContent = "俱乐部";
+      clubTab.onclick = () => {
+        this.currentTab = "club";
+        this.currentPage = 1;
+        this.renderPanel();
+      };
+
+      const storageTab = document.createElement("button");
+      storageTab.className = "grinder-tab" + (this.currentTab === "storage" ? " active" : "");
+      storageTab.textContent = "重复仓库";
+      storageTab.onclick = () => {
+        this.currentTab = "storage";
+        this.currentPage = 1;
+        this.renderPanel();
+      };
+
+      tabsContainer.appendChild(clubTab);
+      tabsContainer.appendChild(storageTab);
+
       const title = document.createElement("h3");
       title.textContent = "🎮 EAFC Grinder";
 
       const count = document.createElement("div");
       count.className = "player-count";
-      count.textContent = `共 ${this.players.length} 名球员`;
+      const tabLabel = this.currentTab === "club" ? "俱乐部" : "重复仓库";
+      count.textContent = `${tabLabel} 共 ${this.players.length} 名球员`;
 
       panel.appendChild(toggleBtn);
       panel.appendChild(closeBtn);
+      panel.appendChild(tabsContainer);
       panel.appendChild(title);
       panel.appendChild(count);
 
@@ -565,8 +751,7 @@
         const item = document.createElement("div");
         item.className = "player-item";
 
-        const staticData = player.getStaticData ? player.getStaticData() : player._staticData;
-        const name = staticData?.name || player._commonName || "Unknown";
+        const name = player.name || "Unknown";
         const rating = player.rating || player.overallRating || "?";
         const position = player.prefPos || player.position || "";
         const rarity = this.getRarityName(player.rareflag);
@@ -593,11 +778,45 @@
         tradeableSpan.textContent = isTradable ? "💰" : "🔒";
         tradeableSpan.title = isTradable ? "可交易" : "不可交易";
 
+        // 调试按钮
+        const debugBtn = document.createElement("span");
+        debugBtn.className = "debug-btn";
+        debugBtn.textContent = "+";
+        debugBtn.style.cssText = "cursor:pointer;color:#f6b803;font-weight:bold;margin-left:6px;font-size:14px;";
+        debugBtn.onclick = () => {
+          const rawItem = player._item;
+          let debugText = `球员调试信息\n\n名称: ${name}\n评分: ${player.rating}\n位置: ${player.position}\n稀有度: ${player.rarityName}\n\n`;
+          debugText += `rawData keys: ${Object.keys(rawItem || {}).slice(0, 30).join(", ")}\n\n`;
+          if (rawItem) {
+            // 提取可用字段
+            const fields = {};
+            for (const key of Object.keys(rawItem)) {
+              const val = rawItem[key];
+              if (val === null || val === undefined) {
+                fields[key] = String(val);
+              } else if (typeof val === 'function') {
+                continue;
+              } else if (typeof val === 'object') {
+                try {
+                  fields[key] = JSON.stringify(val).substring(0, 100);
+                } catch(e) {
+                  fields[key] = '[Circular/Complex]';
+                }
+              } else {
+                fields[key] = String(val);
+              }
+            }
+            debugText += "字段值:\n" + Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join("\n");
+          }
+          prompt("球员调试信息 (Ctrl+C 复制)", debugText);
+        };
+
         item.appendChild(ratingSpan);
         item.appendChild(posSpan);
         item.appendChild(nameSpan);
         item.appendChild(raritySpan);
         item.appendChild(tradeableSpan);
+        item.appendChild(debugBtn);
         listContainer.appendChild(item);
       });
 
@@ -803,74 +1022,79 @@
         self.fillSBCSquad(controller, fillBtn);
       };
 
+      // 创建 SBC 需求详情按钮
+      const infoBtn = document.createElement("button");
+      infoBtn.className = "eafc-grinder-sbc-info-btn";
+      infoBtn.textContent = "❓ SBC 需求详情";
+      infoBtn.style.cssText = `
+        background: rgba(59, 71, 84, 0.8);
+        color: #fff;
+        border: 1px solid #f6b803;
+        padding: 10px 15px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: bold;
+        cursor: pointer;
+        margin: 10px;
+        transition: all 0.3s;
+        font-family: 'UltimateTeam', sans-serif;
+        min-height: 40px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      `;
+      infoBtn.onmouseover = () => {
+        infoBtn.style.background = "rgba(59, 71, 84, 1)";
+        infoBtn.style.boxShadow = "0 4px 12px rgba(246, 184, 3, 0.3)";
+      };
+      infoBtn.onmouseout = () => {
+        infoBtn.style.background = "rgba(59, 71, 84, 0.8)";
+        infoBtn.style.boxShadow = "none";
+      };
+      infoBtn.onclick = () => {
+        self.showSBCRequirementsAlert(controller);
+      };
+
       // 添加到容器
       buttonContainer.appendChild(fillBtn);
+      buttonContainer.appendChild(infoBtn);
       this.sbcFillButton = fillBtn;
 
-      console.log("[EAFC Grinder] SBC 一键填充按钮已添加到 .sbc-button-container");
-
-      // 获取并显示 SBC 需求信息
-      this.loadAndShowSBCRequirements(controller);
+      console.log("[EAFC Grinder] SBC 一键填充按钮和详情按钮已添加到 .sbc-button-container");
 
       // 监听挑战切换
       this._observeChallengeChange(controller);
     },
 
-    // 从 repository 获取 SBC 需求
-    async loadAndShowSBCRequirements(controller) {
+    // 显示 SBC 需求弹窗（点击 ? 按钮时触发）
+    showSBCRequirementsAlert(controller) {
       if (!controller || !controller._challenge) {
-        console.warn("[EAFC Grinder] 无法获取 SBC 挑战信息");
+        alert("❌ 无法获取 SBC 挑战信息");
         return;
       }
 
       const challenge = controller._challenge;
-      const setId = challenge.setId;
-      const challengeId = challenge.challengeId;
+      let requirements = challenge.elgReq || challenge.eligibilityRequirements || [];
 
-      if (!setId) {
-        console.warn("[EAFC Grinder] 无法获取 setId");
-        this.showSBCRequirements(controller);
-        return;
-      }
-
-      console.log(`[EAFC Grinder] 正在获取 SBC 需求: setId=${setId}, challengeId=${challengeId}`);
-
-      try {
-        // 从 SBC repository 获取数据
-        const repository = services.SBC.repository;
-        const set = repository.getSetById(setId);
-
-        if (set && set.challenges) {
-          // 找到当前 challenge 的完整数据
-          const currentChallenge = set.challenges.find(c => c.challengeId === challengeId || c.id === challengeId);
-
-          if (currentChallenge && currentChallenge.elgReq) {
-            console.log("[EAFC Grinder] 从 repository 找到 challenge 需求:", currentChallenge.elgReq);
-            this.showSBCRequirementsWithReqs(controller, currentChallenge.elgReq);
-          } else {
-            console.warn("[EAFC Grinder] repository 中未找到 challenge 数据，使用 fallback");
-            this.showSBCRequirements(controller);
+      // 尝试从 repository 获取更完整的需求
+      if (challenge.setId) {
+        try {
+          const repository = services.SBC.repository;
+          const set = repository.getSetById(challenge.setId);
+          if (set && set.challenges) {
+            const currentChallenge = set.challenges.find(c => c.challengeId === challenge.challengeId || c.id === challenge.challengeId);
+            if (currentChallenge && currentChallenge.elgReq && currentChallenge.elgReq.length > requirements.length) {
+              requirements = currentChallenge.elgReq;
+            }
           }
-        } else {
-          console.warn("[EAFC Grinder] repository 中未找到 set 数据，使用 fallback");
-          this.showSBCRequirements(controller);
-        }
-      } catch (error) {
-        console.error("[EAFC Grinder] 获取 SBC 需求失败:", error);
-        this.showSBCRequirements(controller);
+        } catch (e) {}
       }
-    },
 
-    // 使用指定需求数据显示
-    showSBCRequirementsWithReqs(controller, requirements) {
-      if (!controller || !controller._challenge) return;
+      if (requirements.length === 0) {
+        alert("❌ 无法获取 SBC 需求信息");
+        return;
+      }
 
-      const challenge = controller._challenge;
-
-      console.log("[EAFC Grinder] 当前挑战:", challenge.name);
-      console.log("[EAFC Grinder] 需求数据:", requirements);
-
-      // 解析需求
       const reqs = this.parseSBCRequirements(requirements);
 
       // 构建需求文本
@@ -892,6 +1116,14 @@
 
           let rangeDesc = `${range.count} 名球员，评分 ${minText} 且 ${maxText}`;
 
+          if (range.quality) {
+            const qualityName = range.quality === 1 ? '铜卡' : range.quality === 2 ? '银卡' : range.quality === 3 ? '金卡' : `等级${range.quality}`;
+            rangeDesc += `，卡片: ${qualityName}`;
+          }
+          if (range.minRare !== null && range.minRare !== undefined) {
+            const rareName = range.minRare === 0 ? 'Common' : range.minRare === 1 ? 'Rare' : `稀有度${range.minRare}`;
+            rangeDesc += `，稀有度: ${rareName}+`;
+          }
           if (range.league) {
             rangeDesc += `，联赛: ${this.getLeagueName(range.league)}`;
           }
@@ -924,12 +1156,7 @@
         reqText += `需填充位置: ${fillableCount}\n`;
       }
 
-      // 显示需求弹窗
-      setTimeout(() => {
-        alert(reqText);
-      }, 500);
-
-      console.log("[EAFC Grinder] SBC 需求解析结果:", reqs);
+      alert(reqText);
     },
 
     // 监听挑战切换
@@ -949,66 +1176,12 @@
 
           // 更新当前挑战
           self.currentChallenge = controller._challenge;
-
-          // 重新显示需求
-          self.loadAndShowSBCRequirements(controller);
+          // 更新按钮绑定的控制器引用
+          self.currentSBCController = controller;
         }
       }, 1000);
 
       this._challengeCheckInterval = checkInterval;
-    },
-
-    // 获取并显示 SBC 需求信息
-    loadAndShowSBCRequirements(controller) {
-      if (!controller || !controller._challenge) {
-        return;
-      }
-
-      const challenge = controller._challenge;
-      const requirements = challenge.eligibilityRequirements;
-
-      if (!requirements || requirements.length === 0) {
-        return;
-      }
-
-      // 解析需求
-      const reqs = this.parseSBCRequirements(requirements);
-
-      // 构建可读的需求文本
-      let reqText = `📋 SBC 需求详情\n\n`;
-      reqText += `名称: ${challenge.name || challenge._name || "未知"}\n`;
-
-      const totalPlayers = reqs.ratingRanges.reduce((sum, r) => sum + r.count, 0);
-      if (totalPlayers > 0) {
-        reqText += `阵容: ${totalPlayers} 名球员\n`;
-      }
-
-      if (reqs.ratingRanges.length > 0) {
-        reqText += `\n📊 评分范围需求:\n`;
-        reqs.ratingRanges.forEach((range, idx) => {
-          const minText = range.min > 0 ? `≥${range.min}` : "无下限";
-          const maxText = range.max < 999 ? `≤${range.max}` : "无上限";
-          reqText += `  ${idx + 1}. ${range.count} 名球员，评分 ${minText} 且 ${maxText}\n`;
-        });
-      }
-
-      if (reqs.minChemistry > 0) {
-        reqText += `\n最低默契: ${reqs.minChemistry}\n`;
-      }
-
-      const brickIndices = controller._squad?.getAllBrickIndices ? controller._squad.getAllBrickIndices() : [];
-      if (brickIndices.length > 0) {
-        reqText += `\n锁定位置: ${brickIndices.map(i => i + 1).join(", ")}\n`;
-      }
-
-      const fillableCount = totalPlayers - brickIndices.length;
-      if (fillableCount > 0) {
-        reqText += `需填充位置: ${fillableCount}\n`;
-      }
-
-      setTimeout(() => {
-        alert(reqText);
-      }, 500);
     },
 
     async fillSBCSquad(controller, fillBtn) {
@@ -1116,9 +1289,7 @@
 
       if (!requirements || requirements.length === 0) return reqs;
 
-      const slotGroups = {};
-      let currentSlot = 0;
-
+      // 每个 requirements 数组元素都是一个独立的需求组
       requirements.forEach((req, index) => {
         try {
           const count = req.count || 0;
@@ -1127,12 +1298,7 @@
 
           if (keys.length === 0) return;
 
-          if (!slotGroups[currentSlot]) {
-            slotGroups[currentSlot] = { count: 0, minRating: 0, maxRating: 999 };
-          }
-          if (slotGroups[currentSlot].count === 0 && count > 0) {
-            slotGroups[currentSlot].count = count;
-          }
+          const slot = { count: count, minRating: 0, maxRating: 999 };
 
           keys.forEach(key => {
             const numKey = parseInt(key, 10);
@@ -1141,16 +1307,10 @@
 
             switch (numKey) {
               case 26: // PLAYER_MIN_OVR
-                slotGroups[currentSlot].minRating = firstValue;
+                slot.minRating = firstValue;
                 break;
               case 28: // PLAYER_MAX_OVR
-                slotGroups[currentSlot].maxRating = firstValue;
-                break;
-              case 13: // SCOPE
-                currentSlot++;
-                if (!slotGroups[currentSlot]) {
-                  slotGroups[currentSlot] = { count: 0, minRating: 0, maxRating: 999 };
-                }
+                slot.maxRating = firstValue;
                 break;
               case 19: // TEAM_RATING
                 reqs.minRating = firstValue || 0;
@@ -1158,33 +1318,29 @@
               case 35: // CHEMISTRY_POINTS
                 reqs.minChemistry = firstValue || 0;
                 break;
-              case 18: // PLAYER_RARITY
-                reqs.minRare = count || 0;
+              case 18: // PLAYER_RARITY (0=Common, 1=Rare, 2+=特殊卡)
+                slot.minRare = firstValue;
+                break;
+              case 17: // PLAYER_QUALITY (1=Bronze, 2=Silver, 3=Gold)
+                slot.quality = firstValue;
                 break;
               case 11: // LEAGUE_ID
-                reqs.requiredLeague = firstValue;
+                slot.league = firstValue;
                 break;
               case 10: // NATION_ID
-                reqs.requiredNation = firstValue;
+                slot.nation = firstValue;
                 break;
               case 12: // CLUB_ID
-                reqs.requiredClub = firstValue;
+                slot.club = firstValue;
                 break;
             }
           });
+
+          if (slot.count > 0) {
+            reqs.ratingRanges.push(slot);
+          }
         } catch (e) {
           console.warn(`[EAFC Grinder] 解析需求 ${index} 时出错:`, e);
-        }
-      });
-
-      Object.keys(slotGroups).forEach((slotKey) => {
-        const slot = slotGroups[slotKey];
-        if (slot.count > 0) {
-          reqs.ratingRanges.push({
-            min: slot.minRating,
-            max: slot.maxRating,
-            count: slot.count,
-          });
         }
       });
 
@@ -1203,7 +1359,16 @@
     },
 
     filterEligiblePlayers(requirements) {
-      let eligible = this.getClubPlayers();
+      // 合并俱乐部和仓库的球员
+      let eligible = [...this.getClubPlayers(), ...this.getStoragePlayers()];
+
+      // 去重（按 id）
+      const seenIds = new Set();
+      eligible = eligible.filter(p => {
+        if (seenIds.has(p.id)) return false;
+        seenIds.add(p.id);
+        return true;
+      });
 
       // 如果没有评分范围需求，使用简单的全局过滤
       if (requirements.ratingRanges.length === 0) {
@@ -1243,15 +1408,33 @@
         return a.rating - b.rating;
       });
 
-      // 如果有评分范围需求，按照需求选择球员
+      // 如果有需求范围，按照需求选择球员
       if (requirements.ratingRanges.length > 0) {
         for (const range of requirements.ratingRanges) {
-          // 筛选符合该评分范围的球员
+          // 根据卡片等级推断评分范围
+          let minRating = range.min || 0;
+          let maxRating = range.max || 999;
+
+          // 如果指定了 quality，用 quality 的评分范围覆盖
+          if (range.quality) {
+            if (range.quality === 1) { minRating = 0; maxRating = 64; }      // 铜卡
+            else if (range.quality === 2) { minRating = 65; maxRating = 74; } // 银卡
+            else if (range.quality === 3) { minRating = 75; maxRating = 99; } // 金卡
+          }
+
+          console.log(`[EAFC Grinder] 需求组: 评分 ${minRating}-${maxRating}, 卡片等级 ${range.quality || '任意'}, 稀有度 ${range.minRare ?? '任意'}, 数量 ${range.count}`);
+
+          // 筛选符合条件的球员
           let rangePlayers = sortedPlayers.filter(p =>
             !usedPlayerIds.has(p.id) &&
-            p.rating >= range.min &&
-            (range.max === 999 || p.rating <= range.max)
+            p.rating >= minRating &&
+            p.rating <= maxRating
           );
+
+          // 稀有度过滤 (0=Common, 1=Rare)
+          if (range.minRare !== null && range.minRare !== undefined) {
+            rangePlayers = rangePlayers.filter(p => p.rareflag >= range.minRare);
+          }
 
           // 如果有限制联赛/国籍/俱乐部
           if (range.league) {
@@ -1264,6 +1447,8 @@
             rangePlayers = rangePlayers.filter(p => p.teamId === range.club);
           }
 
+          console.log(`[EAFC Grinder] 符合条件球员: ${rangePlayers.length} 名`);
+
           // 选择排序后的前 N 名球员
           const selected = rangePlayers.slice(0, range.count);
           selected.forEach(player => {
@@ -1271,7 +1456,9 @@
             usedPlayerIds.add(player.id);
           });
 
-          console.log(`[EAFC Grinder] 选择 ${selected.length} 名评分 ${range.min}-${range.max === 999 ? '∞' : range.max} 的球员`);
+          const qualityName = range.quality === 1 ? '铜卡' : range.quality === 2 ? '银卡' : range.quality === 3 ? '金卡' : '任意';
+          const rareText = range.minRare === 0 ? 'Common' : range.minRare === 1 ? 'Rare+' : '任意';
+          console.log(`[EAFC Grinder] 已选择 ${selected.length}/${range.count} 名球员: ${qualityName}, 评分 ${minRating}-${maxRating}`);
         }
       } else {
         // 没有评分范围需求，使用默认逻辑

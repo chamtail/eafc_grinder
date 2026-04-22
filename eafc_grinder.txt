@@ -265,7 +265,7 @@
       }
       .grinder-toggle-btn {
         position: absolute;
-        top: 5px;
+        bottom: 5px;
         left: 10px;
         background: none;
         border: none;
@@ -277,12 +277,38 @@
       .grinder-toggle-btn:hover {
         color: #f6b803;
       }
+      .rarity-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 8px;
+        margin-bottom: 8px;
+        font-size: 11px;
+        color: #a4a9b4;
+      }
+      .rarity-stats .stat-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+      .rarity-stats .stat-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+      }
+      .dot-special { background: #9c27b0; }
+      .dot-rare-gold { background: #c9a44c; }
+      .dot-common-gold { background: #d4a017; }
+      .dot-rare-silver { background: #8a9bae; }
+      .dot-common-silver { background: #b0b8c4; }
+      .dot-rare-bronze { background: #8b5e3c; }
+      .dot-common-bronze { background: #a0785a; }
       .grinder-panel.collapsed .player-list-container,
       .grinder-panel.collapsed .grinder-pagination {
         display: none;
       }
       .grinder-panel.collapsed {
-        max-height: 50px;
+        max-height: 120px;
         overflow: hidden;
       }
       .grinder-tabs {
@@ -697,7 +723,7 @@
       // 折叠/展开按钮
       const toggleBtn = document.createElement("button");
       toggleBtn.className = "grinder-toggle-btn";
-      toggleBtn.textContent = this.collapsed ? "▶" : "▼";
+      toggleBtn.textContent = this.collapsed ? "▼" : "▲";
       toggleBtn.onclick = () => {
         this.collapsed = !this.collapsed;
         this.renderPanel();
@@ -741,11 +767,43 @@
       const tabLabel = this.currentTab === "club" ? "俱乐部" : "重复仓库";
       count.textContent = `${tabLabel} 共 ${this.players.length} 名球员`;
 
-      panel.appendChild(toggleBtn);
+      // 统计各类卡数量
+      const allPlayers = this.currentTab === "club" ? this.getClubPlayers() : this.getStoragePlayers();
+      const stats = { special: 0, rareGold: 0, commonGold: 0, rareSilver: 0, commonSilver: 0, rareBronze: 0, commonBronze: 0 };
+      allPlayers.forEach(p => {
+        const r = p.rareflag || 0;
+        const rating = p.rating || 0;
+        const isRare = r >= 1;
+        const isSpecial = r >= 2;
+        if (isSpecial) { stats.special++; }
+        else if (rating >= 75) { isRare ? stats.rareGold++ : stats.commonGold++; }
+        else if (rating >= 65) { isRare ? stats.rareSilver++ : stats.commonSilver++; }
+        else { isRare ? stats.rareBronze++ : stats.commonBronze++; }
+      });
+
+      const statsDiv = document.createElement("div");
+      statsDiv.className = "rarity-stats";
+      const statItems = [
+        { label: "特殊", value: stats.special, dot: "dot-special" },
+        { label: "稀金", value: stats.rareGold, dot: "dot-rare-gold" },
+        { label: "普金", value: stats.commonGold, dot: "dot-common-gold" },
+        { label: "稀银", value: stats.rareSilver, dot: "dot-rare-silver" },
+        { label: "普银", value: stats.commonSilver, dot: "dot-common-silver" },
+        { label: "稀铜", value: stats.rareBronze, dot: "dot-rare-bronze" },
+        { label: "普铜", value: stats.commonBronze, dot: "dot-common-bronze" },
+      ];
+      statItems.forEach(s => {
+        const item = document.createElement("span");
+        item.className = "stat-item";
+        item.innerHTML = `<span class="stat-dot ${s.dot}"></span>${s.label}:${s.value}`;
+        statsDiv.appendChild(item);
+      });
+
       panel.appendChild(closeBtn);
       panel.appendChild(tabsContainer);
       panel.appendChild(title);
       panel.appendChild(count);
+      panel.appendChild(statsDiv);
 
       // 球员列表容器
       const listContainer = document.createElement("div");
@@ -863,6 +921,7 @@
       pagination.appendChild(pageInfo);
       pagination.appendChild(nextBtn);
       panel.appendChild(pagination);
+      panel.appendChild(toggleBtn);
 
       document.body.appendChild(panel);
 
@@ -990,7 +1049,17 @@
       }
 
       if (!buttonContainer) {
-        console.warn("[EAFC Grinder] 未找到 .sbc-button-container 容器");
+        // 容器尚未渲染（移动端弹出框延迟创建），用 MutationObserver 等待
+        if (this._sbcButtonObserver) this._sbcButtonObserver.disconnect();
+        this._sbcButtonObserver = new MutationObserver(() => {
+          const container = document.querySelector(".sbc-button-container");
+          if (container) {
+            this._sbcButtonObserver.disconnect();
+            this._sbcButtonObserver = null;
+            this.addFillButtonToSBCPanel(controller);
+          }
+        });
+        this._sbcButtonObserver.observe(document.body, { childList: true, subtree: true });
         return;
       }
 
@@ -1026,10 +1095,17 @@
         fillBtn.style.boxShadow = "none";
       };
 
-      fillBtn.onclick = () => {
+      fillBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         if (fillBtn.disabled) return;
         self.fillSBCSquad(controller, fillBtn);
-      };
+      });
+      fillBtn.addEventListener('touchend', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        if (fillBtn.disabled) return;
+        self.fillSBCSquad(controller, fillBtn);
+      });
 
       // 创建 SBC 需求详情按钮
       const infoBtn = document.createElement("button");
@@ -1060,9 +1136,15 @@
         infoBtn.style.background = "rgba(59, 71, 84, 0.8)";
         infoBtn.style.boxShadow = "none";
       };
-      infoBtn.onclick = () => {
+      infoBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         self.showSBCRequirementsAlert(controller);
-      };
+      });
+      infoBtn.addEventListener('touchend', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        self.showSBCRequirementsAlert(controller);
+      });
 
       // 添加到容器
       buttonContainer.appendChild(fillBtn);
@@ -1286,12 +1368,25 @@
         message += fillLog.join("\n");
         message += "\n\n📊 平均评分: " + (optimalSquad.reduce((sum, p) => sum + p.rating, 0) / optimalSquad.length).toFixed(1);
 
-        alert(message);
+        // alert(message);
 
         // 直接恢复按钮状态
         fillBtn.disabled = false;
         fillBtn.textContent = "⚡ 一键填充最优阵容";
         fillBtn.style.opacity = "1";
+
+        // 移动端：填充完成后关闭弹出框
+        try {
+          const rootVC = _appMain?.getRootViewController?.();
+          if (rootVC && typeof isPhone !== 'undefined' && isPhone()) {
+            const popupVC = rootVC.currentController?.currentController;
+            if (popupVC && typeof popupVC.dismiss === 'function') {
+              popupVC.dismiss();
+            } else if (popupVC && popupVC._parentViewController && typeof popupVC._parentViewController.popViewController === 'function') {
+              popupVC._parentViewController.popViewController(popupVC);
+            }
+          }
+        } catch(e) {}
 
       } catch (error) {
         console.error("[EAFC Grinder] 填充阵容时出错:", error);

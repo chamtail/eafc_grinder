@@ -123,33 +123,42 @@
         background: rgba(20, 25, 40, 0.95);
         color: #fff;
         border-radius: 8px;
-        padding: 15px;
-        width: 400px;
+        padding: 10px;
+        width: 300px;
         max-height: 600px;
         overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
         font-family: 'UltimateTeam', sans-serif;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
       }
       .grinder-panel h3 {
-        margin: 0 0 10px 0;
-        font-size: 18px;
+        margin: 0;
+        font-size: 15px;
         color: #f6b803;
-        border-bottom: 2px solid #36b84b;
-        padding-bottom: 5px;
+        white-space: nowrap;
       }
       .grinder-panel .player-count {
-        font-size: 14px;
+        font-size: 12px;
         color: #a4a9b4;
-        margin-bottom: 10px;
+        margin: 0;
+        white-space: nowrap;
+      }
+      .grinder-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 6px;
+        cursor: grab;
       }
       .grinder-panel .player-item {
         display: flex;
         align-items: center;
-        padding: 6px 8px;
-        margin-bottom: 4px;
+        padding: 4px 6px;
+        margin-bottom: 3px;
         background: rgba(59, 71, 84, 0.5);
         border-radius: 4px;
-        font-size: 13px;
+        font-size: 12px;
         transition: background 0.2s;
       }
       .grinder-panel .player-item:hover {
@@ -158,8 +167,8 @@
       .grinder-panel .player-item .rating {
         font-weight: bold;
         color: #f6b803;
-        margin-right: 8px;
-        min-width: 25px;
+        margin-right: 5px;
+        min-width: 18px;
         text-align: center;
       }
       .grinder-panel .player-item .name {
@@ -169,49 +178,19 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .grinder-panel .player-item .position {
-        color: #36b84b;
-        margin-right: 8px;
-        min-width: 30px;
-        text-align: center;
-      }
       .grinder-panel .player-item .rarity {
-        padding: 2px 6px;
+        padding: 2px 4px;
         border-radius: 3px;
-        font-size: 11px;
+        font-size: 10px;
         font-weight: bold;
-        min-width: 50px;
+        min-width: 36px;
+        max-width: 90px;
         text-align: center;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
-      .rarity-common { background: #9c9c9c; color: #000; }
-      .rarity-rare { background: #36b84b; color: #fff; }
-      .rarity-totw { background: #1a1a1a; color: #f6b803; }
-      .rarity-legend { background: #c9a44c; color: #000; }
-      .rarity-hero { background: #4a90e2; color: #fff; }
-      .rarity-icon { background: #9c27b0; color: #fff; }
-      .rarity-toty { background: #1e3a5f; color: #4fc3f7; }
-      .rarity-toty-nominee { background: #2c3e50; color: #3498db; }
-      .rarity-toty-hm-hero { background: #1a237e; color: #7986cb; }
-      .rarity-tots { background: #004d40; color: #4db6ac; }
-      .rarity-utots { background: #004d40; color: #80cbc4; }
-      .rarity-rtwc { background: #bf360c; color: #ffab91; }
-      .rarity-rtqf { background: #e65100; color: #ffcc80; }
-      .rarity-prime-icon { background: #c9a44c; color: #fff; }
-      .rarity-futties { background: #ff6f00; color: #fff; }
-      .rarity-centurions { background: #ffd700; color: #000; }
-      .rarity-rulebreakers { background: #d32f2f; color: #fff; }
-      .rarity-flashback { background: #7b1fa2; color: #e1bee7; }
-      .rarity-headliners { background: #c2185b; color: #f8bbd0; }
-      .rarity-potential { background: #388e3c; color: #c8e6c9; }
-      .rarity-winterwild { background: #0277bd; color: #b3e5fc; }
-      .rarity-evo { background: #00bcd4; color: #fff; }
-      .rarity-ptg { background: #ff5722; color: #fff; }
-      .rarity-ucl { background: #1a237e; color: #fff; }
-      .rarity-ucl-toty { background: #0d47a1; color: #42a5f5; }
-      .rarity-europa { background: #ff6f00; color: #fff; }
-      .rarity-conference { background: #2e7d32; color: #fff; }
-      .rarity-platnick { background: #455a64; color: #fff; }
-      .rarity-showdown { background: #b71c1c; color: #ffcdd2; }
+      .rarity-badge { background: rgba(59, 71, 84, 0.8); color: #fff; border: 1px solid #a4a9b4; }
       .tradeable-badge {
         padding: 2px 4px;
         border-radius: 3px;
@@ -264,31 +243,36 @@
         color: #f6b803;
       }
       .grinder-toggle-btn {
-        position: absolute;
-        bottom: 5px;
+        position: sticky;
+        bottom: 0;
         left: 10px;
-        background: none;
+        background: rgba(20, 25, 40, 0.95);
         border: none;
         color: #fff;
         font-size: 16px;
         cursor: pointer;
         padding: 5px;
+        z-index: 1;
+        align-self: flex-start;
       }
       .grinder-toggle-btn:hover {
         color: #f6b803;
       }
       .rarity-stats {
         display: flex;
-        flex-wrap: wrap;
-        gap: 4px 8px;
-        margin-bottom: 8px;
-        font-size: 11px;
+        flex-wrap: nowrap;
+        gap: 2px 4px;
+        margin-bottom: 4px;
+        font-size: 10px;
         color: #a4a9b4;
+        overflow: hidden;
       }
       .rarity-stats .stat-item {
         display: inline-flex;
         align-items: center;
         gap: 3px;
+        white-space: nowrap;
+        flex-shrink: 0;
       }
       .rarity-stats .stat-dot {
         display: inline-block;
@@ -299,10 +283,8 @@
       .dot-special { background: #9c27b0; }
       .dot-rare-gold { background: #c9a44c; }
       .dot-common-gold { background: #d4a017; }
-      .dot-rare-silver { background: #8a9bae; }
-      .dot-common-silver { background: #b0b8c4; }
-      .dot-rare-bronze { background: #8b5e3c; }
-      .dot-common-bronze { background: #a0785a; }
+      .dot-silver { background: #8a9bae; }
+      .dot-bronze { background: #8b5e3c; }
       .grinder-panel.collapsed .player-list-container,
       .grinder-panel.collapsed .grinder-pagination {
         display: none;
@@ -314,16 +296,16 @@
       .grinder-tabs {
         display: flex;
         gap: 5px;
-        margin-bottom: 10px;
+        margin-bottom: 6px;
       }
       .grinder-tab {
         flex: 1;
-        padding: 6px 12px;
+        padding: 4px 8px;
         background: rgba(59, 71, 84, 0.5);
         border: none;
         border-radius: 4px;
         color: #a4a9b4;
-        font-size: 13px;
+        font-size: 12px;
         font-weight: bold;
         cursor: pointer;
         text-align: center;
@@ -668,7 +650,19 @@
     },
 
     getRarityName(rareflag) {
-      return this.rarityMap[rareflag] || { name: `Other(${rareflag})`, class: "rarity-common" };
+      const mapped = this.rarityMap[rareflag];
+      let name = mapped ? mapped.name : null;
+      try {
+        if (typeof services !== "undefined" && services.Localization && services.Localization.localize) {
+          name = services.Localization.localize("item.raretype" + rareflag);
+        }
+      } catch (e) {}
+      if (!name && mapped) name = mapped.name;
+      if (!name) name = "Other(" + rareflag + ")";
+      return {
+        name: name,
+        class: "rarity-badge"
+      };
     },
 
     // 获取卡片等级 (1=Bronze≤64, 2=Silver 65-74, 3=Gold≥75)
@@ -784,13 +778,11 @@
       const statsDiv = document.createElement("div");
       statsDiv.className = "rarity-stats";
       const statItems = [
-        { label: "特殊", value: stats.special, dot: "dot-special" },
+        { label: "特", value: stats.special, dot: "dot-special" },
         { label: "稀金", value: stats.rareGold, dot: "dot-rare-gold" },
         { label: "普金", value: stats.commonGold, dot: "dot-common-gold" },
-        { label: "稀银", value: stats.rareSilver, dot: "dot-rare-silver" },
-        { label: "普银", value: stats.commonSilver, dot: "dot-common-silver" },
-        { label: "稀铜", value: stats.rareBronze, dot: "dot-rare-bronze" },
-        { label: "普铜", value: stats.commonBronze, dot: "dot-common-bronze" },
+        { label: "银", value: stats.rareSilver + stats.commonSilver, dot: "dot-silver" },
+        { label: "铜", value: stats.rareBronze + stats.commonBronze, dot: "dot-bronze" },
       ];
       statItems.forEach(s => {
         const item = document.createElement("span");
@@ -799,10 +791,14 @@
         statsDiv.appendChild(item);
       });
 
+      const headerRow = document.createElement("div");
+      headerRow.className = "grinder-header grinder-drag-handle";
+      headerRow.appendChild(title);
+      headerRow.appendChild(count);
+
       panel.appendChild(closeBtn);
       panel.appendChild(tabsContainer);
-      panel.appendChild(title);
-      panel.appendChild(count);
+      panel.appendChild(headerRow);
       panel.appendChild(statsDiv);
 
       // 球员列表容器
@@ -820,17 +816,12 @@
 
         const name = player.name || "Unknown";
         const rating = player.rating || player.overallRating || "?";
-        const position = player.prefPos || player.position || "";
         const rarity = this.getRarityName(player.rareflag);
         const isTradable = player.tradable !== false;
 
         const ratingSpan = document.createElement("span");
         ratingSpan.className = "rating";
         ratingSpan.textContent = rating;
-
-        const posSpan = document.createElement("span");
-        posSpan.className = "position";
-        posSpan.textContent = position;
 
         const nameSpan = document.createElement("span");
         nameSpan.className = "name";
@@ -879,7 +870,6 @@
         };
 
         item.appendChild(ratingSpan);
-        item.appendChild(posSpan);
         item.appendChild(nameSpan);
         item.appendChild(raritySpan);
         item.appendChild(tradeableSpan);
@@ -933,6 +923,8 @@
       let isDragging = false;
       let startX, startY, initialRight, initialTop;
 
+      const handle = element.querySelector(".grinder-drag-handle") || element;
+
       const onMouseDown = (e) => {
         // 如果点击的是按钮，不拖拽
         if (e.target.classList.contains("grinder-close-btn") ||
@@ -950,6 +942,7 @@
         initialTop = rect.top;
 
         element.style.transition = "none";
+        element.style.cursor = "grabbing";
         e.preventDefault();
       };
 
@@ -981,15 +974,16 @@
       const onMouseUp = () => {
         isDragging = false;
         element.style.transition = "";
+        element.style.cursor = "";
       };
 
       // 鼠标事件
-      element.addEventListener("mousedown", onMouseDown);
+      handle.addEventListener("mousedown", onMouseDown);
       document.addEventListener("mousemove", onMouseMove);
       document.addEventListener("mouseup", onMouseUp);
 
       // 触摸事件（移动端支持）
-      element.addEventListener("touchstart", (e) => {
+      handle.addEventListener("touchstart", (e) => {
         if (e.target.tagName === "BUTTON") return;
         const touch = e.touches[0];
         onMouseDown({ clientX: touch.clientX, clientY: touch.clientY, target: e.target, preventDefault: () => e.preventDefault() });
@@ -1374,19 +1368,6 @@
         fillBtn.disabled = false;
         fillBtn.textContent = "⚡ 一键填充最优阵容";
         fillBtn.style.opacity = "1";
-
-        // 移动端：填充完成后关闭弹出框
-        try {
-          const rootVC = _appMain?.getRootViewController?.();
-          if (rootVC && typeof isPhone !== 'undefined' && isPhone()) {
-            const popupVC = rootVC.currentController?.currentController;
-            if (popupVC && typeof popupVC.dismiss === 'function') {
-              popupVC.dismiss();
-            } else if (popupVC && popupVC._parentViewController && typeof popupVC._parentViewController.popViewController === 'function') {
-              popupVC._parentViewController.popViewController(popupVC);
-            }
-          }
-        } catch(e) {}
 
       } catch (error) {
         console.error("[EAFC Grinder] 填充阵容时出错:", error);

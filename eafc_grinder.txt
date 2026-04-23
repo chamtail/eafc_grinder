@@ -6,7 +6,9 @@
 // @author       You
 // @match        https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*
 // @match        https://www.easports.com/*/ea-sports-fc/ultimate-team/web-app/*
-// @grant        none
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      futbin.org
 // @run-at       document-end
 // ==/UserScript==
 
@@ -25,50 +27,10 @@
     panelPosition: { left: 0, right: 10, top: 60 },
     sbcFillButton: null, // SBC填充按钮
     currentChallenge: null, // 当前SBC挑战
-
-    // 稀有度映射表
-    rarityMap: {
-      0: { name: "Common", class: "rarity-common" },
-      1: { name: "Rare", class: "rarity-rare" },
-      2: { name: "TOTW", class: "rarity-totw" },
-      3: { name: "Hero", class: "rarity-hero" },
-      4: { name: "Icon", class: "rarity-legend" },
-      21: { name: "UTOTS", class: "rarity-utots" },
-      22: { name: "TOTS", class: "rarity-tots" },
-      23: { name: "TOTY", class: "rarity-toty" },
-      24: { name: "TOTY Nominee", class: "rarity-toty-nominee" },
-      30: { name: "Road to WC", class: "rarity-rtwc" },
-      31: { name: "Road to QF", class: "rarity-rtqf" },
-      41: { name: "Prime Icon", class: "rarity-prime-icon" },
-      42: { name: "Prime Icon Moment", class: "rarity-prime-icon" },
-      45: { name: "FUTTIES", class: "rarity-futties" },
-      46: { name: "Centurions", class: "rarity-centurions" },
-      47: { name: "Rulebreakers", class: "rarity-rulebreakers" },
-      48: { name: "Flashback", class: "rarity-flashback" },
-      50: { name: "Headliner", class: "rarity-headliners" },
-      51: { name: "Potential", class: "rarity-potential" },
-      52: { name: "Special", class: "rarity-icon" },
-      53: { name: "Rare Special", class: "rarity-rare" },
-      54: { name: "TOTY Honorable", class: "rarity-toty" },
-      55: { name: "Winterwild", class: "rarity-winterwild" },
-      60: { name: "Evo", class: "rarity-evo" },
-      70: { name: "Path to Glory", class: "rarity-ptg" },
-      80: { name: "TOTY HM Hero", class: "rarity-toty-hm-hero" },
-      81: { name: "UCL RTTK", class: "rarity-ucl" },
-      82: { name: "UCL TOTY", class: "rarity-ucl-toty" },
-      83: { name: "Europa League", class: "rarity-europa" },
-      84: { name: "Conference League", class: "rarity-conference" },
-      85: { name: "Platnick", class: "rarity-platnick" },
-      86: { name: "Showdown", class: "rarity-showdown" },
-      87: { name: "Team of the Season", class: "rarity-tots" },
-    },
-
-    // SBC 稀有度分组映射 (key 25 PLAYER_RARITY_GROUP 的 value → rareflag 列表)
-    rarityGroupMap: {
-      4: [1],           // Rare
-      44: [2, 22, 87],  // TOTW / TOTS / TOTS
-      // 更多分组待补充
-    },
+    priceMap: null,
+    specialPriceMap: {},
+    _priceMapTimer: null,
+    _specialPriceTimer: null,
 
     // 联赛映射表
     leagueMap: {
@@ -480,6 +442,8 @@
 
         this.showPlayerPanel();
         this.initSBCFillButton();
+        this.fetchPriceMap();
+        this.initSpecialPriceTimer();
 
       } catch (error) {
         console.error("[EAFC Grinder] 加载球员时出错:", error);
@@ -607,6 +571,7 @@
         weight: item.weight || 0,
         birthday: staticData?.birthday || 0,
         traits: item.traits || [],
+        groups: item.groups || [],
         playStyles: item.playStyles || [],
         acceleRate: item.acceleRate || 0,
         itemTypeId: item.itemTypeId,
@@ -650,14 +615,12 @@
     },
 
     getRarityName(rareflag) {
-      const mapped = this.rarityMap[rareflag];
-      let name = mapped ? mapped.name : null;
+      let name = null;
       try {
         if (typeof services !== "undefined" && services.Localization && services.Localization.localize) {
           name = services.Localization.localize("item.raretype" + rareflag);
         }
       } catch (e) {}
-      if (!name && mapped) name = mapped.name;
       if (!name) name = "Other(" + rareflag + ")";
       return {
         name: name,
@@ -705,6 +668,9 @@
         this.players = this.getStoragePlayers();
       }
       this.totalPages = Math.ceil(this.players.length / this.pageSize);
+
+      // 检查是否有新的特殊卡需要查价格
+      this.fetchMissingSpecialPrices();
 
       const panel = document.createElement("div");
       panel.className = "grinder-panel" + (this.collapsed ? " collapsed" : "");
@@ -867,6 +833,7 @@
             debugText += "字段值:\n" + Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join("\n");
           }
           prompt("球员调试信息 (Ctrl+C 复制)", debugText);
+          console.log("[EAFC Grinder DEBUG] groups:", rawItem?.groups, "rareflag:", rawItem?.rareflag, "subtype:", rawItem?.subtype);
         };
 
         item.appendChild(ratingSpan);
@@ -995,6 +962,206 @@
       });
 
       document.addEventListener("touchend", onMouseUp);
+    },
+
+    // 从 futbin 获取评分→市场价格映射，每 30 分钟刷新一次
+    fetchPriceMap() {
+      const self = this;
+
+      const doFetch = () => {
+        let platform = "ps";
+        try {
+          const user = services.User.getUser().getSelectedPersona();
+          if (!user.isXbox && !user.isPlaystation && !user.isStadia) {
+            platform = "pc";
+          }
+        } catch (e) {}
+
+        const year = typeof APP_YEAR_SHORT !== "undefined" ? APP_YEAR_SHORT : "25";
+        const url = "https://www.futbin.org/futbin/api/" + year + "/getSTCCheapest?platform=" + (platform === "pc" ? "PC" : "PS");
+
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: url,
+          headers: {
+            "Content-type": "application/json",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+          },
+          onload(res) {
+            try {
+              const data = JSON.parse(res.response);
+              const priceJson = {};
+              let lowRating = 99;
+              let baseLowPrice = 0;
+              let highRating = 0;
+              let baseHighPrice = 0;
+
+              Object.values(data.data.players || {}).forEach(i => {
+                if (i.data.players && i.data.players.length) {
+                  const rating = i.data.data.rating;
+                  const firstFive = i.data.players.slice(0, 5).map(p => p.LCPrice);
+                  const avg = firstFive.reduce((a, b) => a + b, 0) / firstFive.length;
+                  const price = Math.max(Math.round(avg), 600);
+                  if (rating < lowRating) { lowRating = rating; baseLowPrice = price; }
+                  if (rating > highRating) { highRating = rating; baseHighPrice = price; }
+                  priceJson[rating] = price;
+                }
+              });
+
+              // 线性插值填充金卡低段（75 ~ lowRating-1）
+              const distributeValues = (startKey, endKey, startValue, endValue) => {
+                const keyCount = endKey - startKey + 1;
+                const totalDiff = endValue - startValue;
+                const step = Math.floor(totalDiff / keyCount);
+                const remainder = totalDiff % keyCount;
+                for (let k = startKey, idx = 0; k <= endKey; k++, idx++) {
+                  priceJson[k] = startValue + step * idx + (idx < remainder ? 1 : 0);
+                }
+              };
+
+              // 75~81 如果 futbin 没有数据统一 350，有数据则线性插值填补空白
+              for (let r = 75; r <= 81; r++) {
+                if (!priceJson[r]) priceJson[r] = 350;
+              }
+              if (lowRating > 75) {
+                distributeValues(75, lowRating - 1, 350, priceJson[lowRating] || 350);
+              }
+
+              // 银卡、铜卡统一 200
+              for (let r = 45; r <= 74; r++) {
+                priceJson[r] = 200;
+              }
+
+              // 高评分段（highRating+1 ~ 99）用 1.2 倍递增估算
+              for (let r = highRating + 1; r <= 99; r++) {
+                baseHighPrice = Math.round(baseHighPrice * 1.2);
+                priceJson[r] = baseHighPrice;
+              }
+
+              self.priceMap = priceJson;
+              console.log("[EAFC Grinder] 价格映射已更新, 共", Object.keys(priceJson).length, "个评分");
+            } catch (e) {
+              console.warn("[EAFC Grinder] 解析价格数据失败:", e);
+            }
+          },
+          onerror() {
+            console.warn("[EAFC Grinder] 获取价格数据失败（网络错误）");
+          }
+        });
+      };
+
+      // 立即执行一次，然后每 30 分钟刷新
+      doFetch();
+      if (this._priceMapTimer) clearInterval(this._priceMapTimer);
+      this._priceMapTimer = setInterval(doFetch, 30 * 60 * 1000);
+    },
+
+    // 获取库存中特殊卡的市场价格，存入 specialPriceMap
+    initSpecialPriceTimer() {
+      const self = this;
+      const doFetch = () => {
+        const allPlayers = [...self.getClubPlayers(), ...self.getStoragePlayers()];
+        const specialPlayers = [];
+        const seenDefIds = new Set();
+        allPlayers.forEach(p => {
+          if (p.rareflag > 1 && p.definitionId && !seenDefIds.has(p.definitionId)) {
+            seenDefIds.add(p.definitionId);
+            specialPlayers.push(p);
+          }
+        });
+        if (specialPlayers.length === 0) return;
+        console.log("[EAFC Grinder] 开始全量刷新特殊卡价格，共", specialPlayers.length, "张");
+        self._fetchSpecialPricesForPlayers(specialPlayers);
+      };
+      this._specialPriceTimer = setTimeout(() => {
+        doFetch();
+        this._specialPriceTimer = setInterval(doFetch, 30 * 60 * 1000);
+      }, 30 * 60 * 1000);
+    },
+
+    _fetchSpecialPricesForPlayers(players) {
+      const self = this;
+      let platform = "ps";
+      try {
+        const user = services.User.getUser().getSelectedPersona();
+        if (!user.isXbox && !user.isPlaystation && !user.isStadia) platform = "pc";
+      } catch (e) {}
+      const year = typeof APP_YEAR_SHORT !== "undefined" ? APP_YEAR_SHORT : "25";
+      const priceKey = platform === "pc" ? "pc_LCPrice" : "ps_LCPrice";
+
+      const fetchOne = (p) => new Promise((resolve) => {
+        const url = "https://www.futbin.org/futbin/api/" + year +
+          "/getFilteredPlayers?platform=" + (platform === "pc" ? "PC" : "PS") +
+          "&nation=" + p.nationId +
+          "&league=" + p.leagueId +
+          "&rating=" + p.rating + "-" + p.rating +
+          "&club=" + p.teamId +
+          "&sort=rating&order=desc&page=1";
+        GM_xmlhttpRequest({
+          method: "GET",
+          url: url,
+          onload(res) {
+            try {
+              const data = JSON.parse(res.response);
+              if (data.data && data.data.length) {
+                const match = data.data.find(item => item.resource_id === p.definitionId) || data.data[0];
+                const price = match[priceKey] || 0;
+                if (price > 0) {
+                  self.specialPriceMap[p.definitionId] = price;
+                } else {
+                  // 价格为 0 说明不可交易，用最高价作为成本避免被优先选入方案
+                  const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
+                  self.specialPriceMap[p.definitionId] = maxPrice;
+                }
+              } else {
+                // 查不到数据，同样用最高价兜底
+                const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
+                self.specialPriceMap[p.definitionId] = maxPrice;
+              }
+            } catch (e) {
+              const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
+              self.specialPriceMap[p.definitionId] = maxPrice;
+            }
+            resolve();
+          },
+          onerror() {
+            const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
+            self.specialPriceMap[p.definitionId] = maxPrice;
+            resolve();
+          }
+        });
+      });
+
+      const BATCH_SIZE = 5;
+      const BATCH_DELAY = 1000;
+      const runBatches = async () => {
+        for (let i = 0; i < players.length; i += BATCH_SIZE) {
+          const batch = players.slice(i, i + BATCH_SIZE);
+          await Promise.all(batch.map(fetchOne));
+          if (i + BATCH_SIZE < players.length) {
+            await new Promise(r => setTimeout(r, BATCH_DELAY));
+          }
+        }
+        console.log("[EAFC Grinder] 特殊卡价格更新完成，本次获取", players.length, "条");
+      };
+      runBatches();
+    },
+
+    // 检查并补充查询还没有价格的特殊卡
+    fetchMissingSpecialPrices() {
+      const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
+      const missing = [];
+      const seenDefIds = new Set();
+      allPlayers.forEach(p => {
+        if (p.rareflag > 1 && p.definitionId && !this.specialPriceMap[p.definitionId] && !seenDefIds.has(p.definitionId)) {
+          seenDefIds.add(p.definitionId);
+          missing.push(p);
+        }
+      });
+      if (missing.length === 0) return;
+      console.log("[EAFC Grinder] 发现", missing.length, "张新特殊卡，开始查价格");
+      this._fetchSpecialPricesForPlayers(missing);
     },
 
     // SBC 一键填充功能
@@ -1231,9 +1398,12 @@
         reqText += `全队卡片等级: ${qName}\n`;
       }
       if (reqs.minRareCount > 0) {
-        const groupFlags = this.rarityGroupMap[reqs.minRarityGroup] || [reqs.minRarityGroup];
-        const names = groupFlags.map(f => this.getRarityName(f).name).join('/');
-        reqText += `至少 ${reqs.minRareCount} 名 ${names} 球员\n`;
+        let groupName = "group " + reqs.minRarityGroup;
+        try {
+          const loc = services.Localization.localize("Player_Group_" + reqs.minRarityGroup);
+          if (loc) groupName = loc;
+        } catch(e) {}
+        reqText += `至少 ${reqs.minRareCount} 名 ${groupName} 球员\n`;
       }
       if (reqs.minTeamRating > 0) {
         reqText += `阵容平均评分: ≥${reqs.minTeamRating}\n`;
@@ -1336,18 +1506,38 @@
           squadRequirements.minPlayers = formationData.generalPositions.length - brickIndices.length;
         } catch(e) {}
 
+        // === TEAM_RATING 处理 ===
+        let fillRatings = null;
+        if (squadRequirements.minTeamRating > 0) {
+          try {
+            fillRatings = this.calculateFillRatings(
+              squadRequirements.minTeamRating,
+              controller,
+              squadRequirements.minRarityGroup,
+              squadRequirements.minRareCount
+            );
+            console.log("[EAFC Grinder] TEAM_RATING 计算结果:", fillRatings);
+          } catch (err) {
+            alert("阵容评分计算失败: " + err.message);
+            fillBtn.disabled = false;
+            fillBtn.textContent = "⚡ 一键填充最优阵容";
+            fillBtn.style.opacity = "1";
+            return;
+          }
+        }
+
         // 从球员数据库中筛选符合条件的球员
         const eligiblePlayers = this.filterEligiblePlayers(squadRequirements);
 
-        // 选择最优阵容（评分最低但符合条件）
-        const optimalSquad = this.selectOptimalSquad(eligiblePlayers, squadRequirements);
+        // 选择最优阵容（评分最低但符合条件，若存在 TEAM_RATING 则按 fillRatings 指导）
+        const optimalSquad = this.selectOptimalSquad(eligiblePlayers, squadRequirements, fillRatings);
 
         // 计算需要的球员数
         const ratingRangesTotal = squadRequirements.ratingRanges.reduce((sum, r) => sum + r.count, 0);
         const requiredCount = ratingRangesTotal > 0 ? ratingRangesTotal : squadRequirements.minPlayers;
 
         if (optimalSquad.length < requiredCount) {
-          alert(`❌ 俱乐部中没有足够的球员满足 SBC 需求\n\n需要: ${requiredCount} 名\n可用: ${optimalSquad.length} 名`);
+          alert("❌ 俱乐部中没有足够的球员满足 SBC 需求\n\n需要: " + requiredCount + " 名\n可用: " + optimalSquad.length + " 名");
           fillBtn.disabled = false;
           fillBtn.textContent = "⚡ 一键填充最优阵容";
           fillBtn.style.opacity = "1";
@@ -1357,12 +1547,20 @@
         // 填充到阵容
         const fillLog = await this.fillSquadWithPlayers(controller, optimalSquad);
 
-        // 构建弹窗消息
-        let message = "✅ 阵容填充完成！\n\n";
-        message += fillLog.join("\n");
-        message += "\n\n📊 平均评分: " + (optimalSquad.reduce((sum, p) => sum + p.rating, 0) / optimalSquad.length).toFixed(1);
-
-        // alert(message);
+        // 验证阵容评分
+        if (squadRequirements.minTeamRating > 0) {
+          const finalRatings = [];
+          const fps = controller._squad.getFieldPlayers ? controller._squad.getFieldPlayers() : [];
+          fps.forEach(fp => {
+            if (fp.item && fp.item.rating) {
+              finalRatings.push(fp.item.rating);
+            }
+          });
+          const actualRating = this.calculateTeamRating(finalRatings);
+          if (actualRating < squadRequirements.minTeamRating) {
+            alert("警告: 填充后阵容评分为 " + actualRating + "，未达到要求的 " + squadRequirements.minTeamRating);
+          }
+        }
 
         // 直接恢复按钮状态
         fillBtn.disabled = false;
@@ -1484,6 +1682,7 @@
               case 25: // PLAYER_RARITY_GROUP: count 名 rarityGroup === firstValue 的球员
                 reqs.minRareCount = count > 0 ? count : 1;
                 reqs.minRarityGroup = firstValue;
+                console.log("[EAFC Grinder DEBUG] PLAYER_RARITY_GROUP value:", firstValue, "count:", count, "raw value:", value);
                 isGlobal = true;
                 break;
               case 26: // PLAYER_MIN_OVR
@@ -1579,7 +1778,7 @@
       return eligible;
     },
 
-    selectOptimalSquad(eligiblePlayers, requirements) {
+    selectOptimalSquad(eligiblePlayers, requirements, fillRatings) {
       const squad = [];
       const usedPlayerIds = new Set();
       const usedMetaDataIds = new Set();
@@ -1608,11 +1807,31 @@
         if (mid != null) usedMetaDataIds.add(mid);
       };
 
-      // 第一步：满足 rarityGroup 需求（先选指定稀有度的球员）
+      // 第一步：满足 rarityGroup 需求
       if (requirements.minRareCount > 0 && requirements.minRarityGroup !== null) {
-        const targetFlags = this.rarityGroupMap[requirements.minRarityGroup] || [requirements.minRarityGroup];
-        const isInGroup = (p) => targetFlags.includes(p.rareflag);
+        const targetGroup = requirements.minRarityGroup;
+        const isInGroup = (p) => Array.isArray(p.groups) && p.groups.includes(targetGroup);
+
+        // 如果 calculateFillRatings 已经指定了最优的特殊卡，优先选它们
+        const preferredDefIds = fillRatings && fillRatings._groupPlayerDefIds
+          ? new Set(fillRatings._groupPlayerDefIds)
+          : null;
+
         let picked = 0;
+
+        // 先选指定的
+        if (preferredDefIds) {
+          for (const p of sortedPlayers) {
+            if (picked >= requirements.minRareCount) break;
+            if (!canPick(p)) continue;
+            if (!isInGroup(p)) continue;
+            if (!preferredDefIds.has(p.definitionId)) continue;
+            pick(p);
+            picked++;
+          }
+        }
+
+        // 不足时再从剩余满足 group 的里补
         for (const p of sortedPlayers) {
           if (picked >= requirements.minRareCount) break;
           if (!canPick(p)) continue;
@@ -1649,15 +1868,53 @@
         }
       }
 
-      // 第三步：填满剩余空缺
+      // 第三步：按 fillRatings 填充（如果存在 TEAM_RATING 要求）
+      let neededRatings = null;
+      if (fillRatings && fillRatings.length > 0) {
+        neededRatings = {};
+        fillRatings.forEach(r => {
+          neededRatings[r] = (neededRatings[r] || 0) + 1;
+        });
+        // 扣除阶段 A 和 B 已选的评分
+        squad.forEach(p => {
+          const r = p.rating;
+          if (neededRatings[r] > 0) {
+            neededRatings[r]--;
+          }
+        });
+      }
+
       while (squad.length < totalNeeded) {
         let found = false;
-        for (const p of sortedPlayers) {
-          if (!canPick(p)) continue;
-          pick(p);
-          found = true;
-          break;
+
+        if (neededRatings) {
+          // 优先从 neededRatings 中还有的评分里选
+          const neededRatingList = Object.keys(neededRatings)
+            .map(Number)
+            .filter(r => neededRatings[r] > 0);
+
+          if (neededRatingList.length > 0) {
+            for (const p of sortedPlayers) {
+              if (!canPick(p)) continue;
+              if (!neededRatingList.includes(p.rating)) continue;
+              pick(p);
+              neededRatings[p.rating]--;
+              found = true;
+              break;
+            }
+          }
         }
+
+        if (!found) {
+          // 按原有逻辑选最低分
+          for (const p of sortedPlayers) {
+            if (!canPick(p)) continue;
+            pick(p);
+            found = true;
+            break;
+          }
+        }
+
         if (!found) break;
       }
 
@@ -1666,6 +1923,229 @@
 
     getRequiredPlayerCount(requirements) {
       return requirements.minPlayers || 11;
+    },
+
+    // FC 阵容评分计算公式
+    calculateTeamRating(ratings) {
+      if (!ratings || ratings.length === 0) return 0;
+      let sum = ratings.reduce((a, b) => a + b, 0);
+      const avg = sum / 11;
+      ratings.forEach(r => {
+        if (r > avg) {
+          sum += (r - avg);
+        }
+      });
+      return Math.floor(Math.round(sum) / 11);
+    },
+
+    // 获取库存评分分布（club + storage）
+    getInventoryRatings() {
+      const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
+      const countByRating = {};
+      const pricesByRating = {}; // 每个评分下所有卡的有效价格列表，从低到高排序
+      allPlayers.forEach(p => {
+        const r = p.rating || 0;
+        if (r <= 0) return;
+        countByRating[r] = (countByRating[r] || 0) + 1;
+        const marketPrice = this.priceMap ? (this.priceMap[r] || r * 10) : r * 10;
+        const minPrice = p._item?._itemPriceLimits?.minimum || 0;
+        const effectivePrice = Math.max(marketPrice, minPrice);
+        if (!pricesByRating[r]) pricesByRating[r] = [];
+        pricesByRating[r].push(effectivePrice);
+      });
+      // 每个评分的价格列表从低到高排序，选第 N 张时用第 N 便宜的价格
+      Object.keys(pricesByRating).forEach(r => {
+        pricesByRating[r].sort((a, b) => a - b);
+      });
+      const uniqueRatings = Object.keys(countByRating)
+        .map(Number)
+        .sort((a, b) => b - a);
+      return { countByRating, uniqueRatings, pricesByRating };
+    },
+
+    // 生成有重复组合（非递减序列）
+    _multicombinations(arr, k) {
+      const result = [];
+      const backtrack = (start, current) => {
+        if (current.length === k) {
+          result.push([...current]);
+          return;
+        }
+        for (let i = start; i < arr.length; i++) {
+          current.push(arr[i]);
+          backtrack(i, current);
+          current.pop();
+        }
+      };
+      backtrack(0, []);
+      return result;
+    },
+
+    // 计算满足阵容评分要求的最优填充评分列表
+    // rarityGroup / rarityCount 可选，有 rarityGroup 要求时联合优化
+    calculateFillRatings(targetRating, controller, rarityGroup, rarityCount) {
+      if (!this.priceMap) {
+        throw new Error("价格数据尚未加载，请稍后再试");
+      }
+
+      const squad = controller._squad;
+      const brickIndices = squad.getAllBrickIndices ? squad.getAllBrickIndices() : [];
+      const lackNumber = 11 - brickIndices.length;
+      if (lackNumber <= 0) return [];
+
+      const inventory = this.getInventoryRatings();
+      const haveRatings = inventory.uniqueRatings;
+      const haveRatingsCount = inventory.countByRating;
+      const pricesByRating = inventory.pricesByRating;
+      if (haveRatings.length === 0) throw new Error("库存中没有可用球员");
+
+      // 辅助：计算纯金卡方案的最优评分组合和总价
+      const calcBestNormalCombo = (slots, fixedRatings) => {
+        // fixedRatings 是已固定的评分（特殊卡），slots 是剩余空位数
+        const allRatings = [...fixedRatings, ...Array(slots).fill(0)];
+
+        // 找 basisRating
+        let basisRating = 0;
+        for (let i = haveRatings.length - 1; i >= 0; i--) {
+          const r = haveRatings[i];
+          const sim = [...fixedRatings, ...Array(slots).fill(r)];
+          if (this.calculateTeamRating(sim) >= targetRating) {
+            basisRating = r;
+            break;
+          }
+        }
+        if (basisRating === 0) return null; // 无法达标
+
+        let fillNumber = 5;
+        if (slots <= 3) fillNumber = 9;
+        else if (slots === 4) fillNumber = 8;
+        else if (slots === 5) fillNumber = 7;
+        else if (slots === 6) fillNumber = 6;
+
+        const fillOffset = Math.floor(fillNumber / 2) - 1;
+        const basisIndex = haveRatings.indexOf(basisRating);
+        let sliceStart = Math.max(0, basisIndex - fillOffset);
+        let sliceEnd = Math.min(haveRatings.length, basisIndex + fillNumber - fillOffset);
+        const candidates = haveRatings.slice(sliceStart, sliceEnd);
+
+        const combinations = this._multicombinations(candidates, slots);
+        let best = null;
+
+        for (const combo of combinations) {
+          const sim = [...fixedRatings, ...combo];
+          if (this.calculateTeamRating(sim) < targetRating) continue;
+
+          const needCount = {};
+          combo.forEach(r => { needCount[r] = (needCount[r] || 0) + 1; });
+          let lackCount = 0;
+          let totalValue = 0;
+          for (const rStr of Object.keys(needCount)) {
+            const r = Number(rStr);
+            const need = needCount[r];
+            const have = haveRatingsCount[r] || 0;
+            if (have < need) lackCount += need - have;
+            // 取前 need 张最便宜的价格之和
+            const prices = pricesByRating[r] || [];
+            for (let i = 0; i < need; i++) {
+              totalValue += prices[i] || this.priceMap[r] || r * 10;
+            }
+          }
+
+          if (!best || lackCount < best.lackCount || (lackCount === best.lackCount && totalValue < best.totalValue)) {
+            best = { ratings: combo, totalValue, lackCount };
+          }
+        }
+        return best;
+      };
+
+      // 没有 rarityGroup 要求，走普通逻辑
+      if (!rarityGroup || !rarityCount) {
+        const best = calcBestNormalCombo(lackNumber, []);
+        if (!best) throw new Error("库存最高评分不足以达到目标阵容评分 " + targetRating);
+        if (best.lackCount > 0) {
+          const needCount = {};
+          best.ratings.forEach(r => { needCount[r] = (needCount[r] || 0) + 1; });
+          const details = Object.keys(needCount).map(rStr => {
+            const r = Number(rStr);
+            const lack = needCount[r] - (haveRatingsCount[r] || 0);
+            return lack > 0 ? r + "分: 缺 " + lack + " 张" : null;
+          }).filter(Boolean);
+          throw new Error("库存不足以满足阵容评分要求:\n" + details.join("\n"));
+        }
+        return best.ratings;
+      }
+
+      // 有 rarityGroup 要求：枚举所有满足 group 的特殊卡组合，找总成本最低的方案
+      const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
+      const groupPlayers = allPlayers.filter(p =>
+        Array.isArray(p.groups) && p.groups.includes(rarityGroup)
+      );
+
+      if (groupPlayers.length < rarityCount) {
+        throw new Error("库存中满足稀有度要求的球员不足，需要 " + rarityCount + " 张，只有 " + groupPlayers.length + " 张");
+      }
+
+      // 去重（同 definitionId 只取一张）
+      const seenDef = new Set();
+      const uniqueGroupPlayers = groupPlayers.filter(p => {
+        if (seenDef.has(p.definitionId)) return false;
+        seenDef.add(p.definitionId);
+        if (!this.specialPriceMap[p.definitionId]) return false; // 价格尚未加载，跳过
+        return true;
+      });
+
+      // 生成特殊卡的 rarityCount 张组合
+      const groupCombos = this._multicombinations(uniqueGroupPlayers, rarityCount);
+
+      let bestOverall = null;
+
+      for (const groupCombo of groupCombos) {
+        // 特殊卡总价
+        const specialCost = groupCombo.reduce((sum, p) => {
+          return sum + this.specialPriceMap[p.definitionId];
+        }, 0);
+
+        const fixedRatings = groupCombo.map(p => p.rating);
+        const remainSlots = lackNumber - rarityCount;
+
+        let normalBest = null;
+        if (remainSlots > 0) {
+          normalBest = calcBestNormalCombo(remainSlots, fixedRatings);
+          if (!normalBest) continue; // 这个特殊卡组合配不出达标的金卡
+          if (normalBest.lackCount > 0) continue; // 金卡库存不足，跳过
+        } else {
+          // 全部都是特殊卡，直接验证评分
+          if (this.calculateTeamRating(fixedRatings) < targetRating) continue;
+          normalBest = { ratings: [], totalValue: 0, lackCount: 0 };
+        }
+
+        const totalCost = specialCost + normalBest.totalValue;
+
+        if (!bestOverall || totalCost < bestOverall.totalCost) {
+          bestOverall = {
+            totalCost,
+            groupCombo,
+            normalRatings: normalBest.ratings,
+          };
+        }
+      }
+
+      if (!bestOverall) {
+        throw new Error("无法找到满足阵容评分 " + targetRating + " 且满足稀有度要求的方案");
+      }
+
+      console.log("[EAFC Grinder] TEAM_RATING+rarityGroup 最优方案, 总成本:", bestOverall.totalCost,
+        "特殊卡评分:", bestOverall.groupCombo.map(p => p.rating),
+        "金卡评分:", bestOverall.normalRatings);
+
+      // 返回完整的 fillRatings（特殊卡评分 + 金卡评分）
+      // 同时把选定的特殊卡 definitionId 记录下来供 selectOptimalSquad 使用
+      const result = [
+        ...bestOverall.groupCombo.map(p => p.rating),
+        ...bestOverall.normalRatings
+      ];
+      result._groupPlayerDefIds = bestOverall.groupCombo.map(p => p.definitionId);
+      return result;
     },
 
     async fillSquadWithPlayers(controller, squad) {
@@ -1773,40 +2253,18 @@
             try {
               obs.unobserve(self);
 
-              // 不管保存结果如何，都重新加载数据
-              services.SBC.loadChallengeData(challenge).observe(self, (obs2, result2) => {
-                console.log("[EAFC Grinder] loadChallengeData 回调触发, success:", result2?.success);
-                try {
-                  obs2.unobserve(self);
+              // 通知数据变更
+              if (challenge.onDataChange) {
+                challenge.onDataChange.notify({ squad: squad });
+                console.log("[EAFC Grinder] 已通知阵容数据变更");
+              }
 
-                  let finalSquad = squad;
-
-                  if (result2 && result2.success && result2.response && result2.response.squad) {
-                    const { squad: loadedSquad } = result2.response;
-                    challenge.squad.setPlayers(loadedSquad._players.map(p => p._item), true);
-                    finalSquad = loadedSquad;
-                    console.log("[EAFC Grinder] 已从服务器加载最新阵容数据");
-                  }
-
-                  // 通知数据变更
-                  if (challenge.onDataChange) {
-                    challenge.onDataChange.notify({ squad: finalSquad });
-                    console.log("[EAFC Grinder] 已通知阵容数据变更");
-                  }
-
-                  // 设置交互状态
-                  self._setInteractionState();
-
-                  console.log("[EAFC Grinder] 阵容保存流程完成");
-                } catch (innerErr) {
-                  console.warn("[EAFC Grinder] 处理加载结果时出错:", innerErr);
-                }
-                doResolve();
-              });
+              self._setInteractionState();
+              console.log("[EAFC Grinder] 阵容保存流程完成");
             } catch (saveErr) {
               console.warn("[EAFC Grinder] 处理保存结果时出错:", saveErr);
-              doResolve();
             }
+            doResolve();
           });
         } catch (err) {
           console.warn("[EAFC Grinder] saveChallenge 调用异常:", err);

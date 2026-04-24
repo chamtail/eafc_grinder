@@ -43,23 +43,38 @@
         color: #fff;
         border-radius: 8px;
         padding: 10px;
-        width: 300px;
+        width: 260px;
         max-height: 600px;
-        overflow-y: auto;
-        -webkit-overflow-scrolling: touch;
+        overflow: hidden;
         font-family: 'UltimateTeam', sans-serif;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+        display: flex;
+        flex-direction: column;
+      }
+      .player-list-container {
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(246, 184, 3, 0.4) transparent;
+      }
+      .player-list-container::-webkit-scrollbar {
+        width: 4px;
+      }
+      .player-list-container::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .player-list-container::-webkit-scrollbar-thumb {
+        background: rgba(246, 184, 3, 0.4);
+        border-radius: 2px;
+      }
+      .player-list-container::-webkit-scrollbar-thumb:hover {
+        background: rgba(246, 184, 3, 0.7);
       }
       .grinder-panel h3 {
         margin: 0;
         font-size: 15px;
         color: #f6b803;
-        white-space: nowrap;
-      }
-      .grinder-panel .player-count {
-        font-size: 12px;
-        color: #a4a9b4;
-        margin: 0;
         white-space: nowrap;
       }
       .grinder-header {
@@ -71,8 +86,9 @@
         cursor: grab;
       }
       .grinder-panel .player-item {
-        display: flex;
-        align-items: center;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        grid-template-rows: auto auto;
         padding: 4px 6px;
         margin-bottom: 3px;
         background: rgba(59, 71, 84, 0.5);
@@ -83,44 +99,71 @@
       .grinder-panel .player-item:hover {
         background: rgba(59, 71, 84, 0.8);
       }
+      .grinder-panel .player-item .left-col {
+        grid-column: 1;
+        grid-row: 1 / 3;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        overflow: hidden;
+        margin-right: 8px;
+      }
       .grinder-panel .player-item .rating {
         font-weight: bold;
         color: #f6b803;
+        font-size: 13px;
+        flex-shrink: 0;
         margin-right: 5px;
-        min-width: 18px;
-        text-align: center;
       }
       .grinder-panel .player-item .name {
-        flex: 1;
         color: #fff;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+        font-size: 12px;
+      }
+      .grinder-panel .player-item .row1 {
+        grid-column: 2;
+        grid-row: 1;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+      }
+      .grinder-panel .player-item .row2 {
+        grid-column: 2;
+        grid-row: 2;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 4px;
+        margin-top: 2px;
       }
       .grinder-panel .player-item .rarity {
-        padding: 2px 4px;
+        padding: 1px 3px;
         border-radius: 3px;
         font-size: 10px;
         font-weight: bold;
-        min-width: 36px;
-        max-width: 90px;
-        text-align: center;
-        overflow: hidden;
-        text-overflow: ellipsis;
         white-space: nowrap;
+        flex-shrink: 0;
       }
       .rarity-badge { background: rgba(59, 71, 84, 0.8); color: #fff; border: 1px solid #a4a9b4; }
       .tradeable-badge {
-        padding: 2px 4px;
+        padding: 1px 3px;
         border-radius: 3px;
         font-size: 10px;
         font-weight: bold;
-        margin-left: 4px;
-        min-width: 20px;
-        text-align: center;
+        flex-shrink: 0;
       }
       .tradeable-yes { background: #36b84b; color: #fff; }
       .tradeable-no { background: #d32f2f; color: #fff; }
+      .grinder-panel .player-item .price {
+        font-size: 11px;
+        color: #a4c8ff;
+        white-space: nowrap;
+        font-family: monospace;
+        flex: 1;
+        text-align: right;
+      }
       .grinder-pagination {
         display: flex;
         justify-content: center;
@@ -148,43 +191,30 @@
         color: #a4a9b4;
         font-size: 12px;
       }
-      .grinder-close-btn {
-        position: absolute;
-        top: 5px;
-        right: 10px;
+      .grinder-toggle-btn {
         background: none;
         border: none;
-        color: #fff;
-        font-size: 20px;
+        color: #a4a9b4;
+        font-size: 11px;
         cursor: pointer;
-      }
-      .grinder-close-btn:hover {
-        color: #f6b803;
-      }
-      .grinder-toggle-btn {
-        position: sticky;
-        bottom: 0;
-        left: 10px;
-        background: rgba(20, 25, 40, 0.95);
-        border: none;
-        color: #fff;
-        font-size: 16px;
-        cursor: pointer;
-        padding: 5px;
-        z-index: 1;
-        align-self: flex-start;
+        padding: 2px 5px;
+        border-radius: 3px;
+        white-space: nowrap;
+        flex-shrink: 0;
+        margin-left: auto;
       }
       .grinder-toggle-btn:hover {
-        color: #f6b803;
+        color: #fff;
+        background: rgba(59, 71, 84, 0.8);
       }
       .rarity-stats {
         display: flex;
-        flex-wrap: nowrap;
-        gap: 2px 4px;
+        flex-wrap: wrap;
+        gap: 2px 6px;
         margin-bottom: 4px;
         font-size: 10px;
         color: #a4a9b4;
-        overflow: hidden;
+        flex-shrink: 0;
       }
       .rarity-stats .stat-item {
         display: inline-flex;
@@ -216,6 +246,22 @@
         display: flex;
         gap: 5px;
         margin-bottom: 6px;
+        align-items: center;
+      }
+      .grinder-tab-badge {
+        display: inline-block;
+        background: rgba(255,255,255,0.18);
+        color: #fff;
+        border-radius: 8px;
+        font-size: 10px;
+        font-weight: bold;
+        padding: 0 5px;
+        margin-left: 4px;
+        vertical-align: middle;
+        line-height: 15px;
+      }
+      .grinder-tab.active .grinder-tab-badge {
+        background: rgba(0,0,0,0.2);
       }
       .grinder-tab {
         flex: 1;
@@ -648,16 +694,11 @@
       // 折叠/展开按钮
       const toggleBtn = document.createElement("button");
       toggleBtn.className = "grinder-toggle-btn";
-      toggleBtn.textContent = this.collapsed ? "▼" : "▲";
+      toggleBtn.textContent = this.collapsed ? "▼ 展开" : "▲ 收起";
       toggleBtn.onclick = () => {
         this.collapsed = !this.collapsed;
         this.renderPanel();
       };
-
-      const closeBtn = document.createElement("button");
-      closeBtn.className = "grinder-close-btn";
-      closeBtn.textContent = "×";
-      closeBtn.onclick = () => panel.remove();
 
       // Tab 切换
       const tabsContainer = document.createElement("div");
@@ -665,7 +706,7 @@
 
       const clubTab = document.createElement("button");
       clubTab.className = "grinder-tab" + (this.currentTab === "club" ? " active" : "");
-      clubTab.textContent = "俱乐部";
+      clubTab.innerHTML = `俱乐部<span class="grinder-tab-badge">${this.getClubPlayers().length}</span>`;
       clubTab.onclick = () => {
         this.currentTab = "club";
         this.currentPage = 1;
@@ -674,7 +715,7 @@
 
       const storageTab = document.createElement("button");
       storageTab.className = "grinder-tab" + (this.currentTab === "storage" ? " active" : "");
-      storageTab.textContent = "重复仓库";
+      storageTab.innerHTML = `重复仓库<span class="grinder-tab-badge">${this.getStoragePlayers().length}</span>`;
       storageTab.onclick = () => {
         this.currentTab = "storage";
         this.currentPage = 1;
@@ -687,12 +728,6 @@
       const title = document.createElement("h3");
       title.textContent = "🎮 EAFC Grinder";
 
-      const count = document.createElement("div");
-      count.className = "player-count";
-      const tabLabel = this.currentTab === "club" ? "俱乐部" : "重复仓库";
-      count.textContent = `${tabLabel} 共 ${this.players.length} 名球员`;
-
-      // 统计各类卡数量
       const allPlayers = this.currentTab === "club" ? this.getClubPlayers() : this.getStoragePlayers();
       const stats = { special: 0, rareGold: 0, commonGold: 0, rareSilver: 0, commonSilver: 0, rareBronze: 0, commonBronze: 0 };
       allPlayers.forEach(p => {
@@ -725,12 +760,16 @@
       const headerRow = document.createElement("div");
       headerRow.className = "grinder-header grinder-drag-handle";
       headerRow.appendChild(title);
-      headerRow.appendChild(count);
 
-      panel.appendChild(closeBtn);
+      const statsRow = document.createElement("div");
+      statsRow.style.cssText = "display:flex;align-items:flex-start;gap:4px;margin-bottom:4px;cursor:grab;";
+      statsRow.className = "grinder-drag-handle";
+      statsRow.appendChild(statsDiv);
+      statsRow.appendChild(toggleBtn);
+
       panel.appendChild(tabsContainer);
       panel.appendChild(headerRow);
-      panel.appendChild(statsDiv);
+      panel.appendChild(statsRow);
 
       // 球员列表容器
       const listContainer = document.createElement("div");
@@ -750,6 +789,9 @@
         const rarity = this.getRarityName(player.rareflag);
         const isTradable = player.tradable !== false;
 
+        const leftCol = document.createElement("div");
+        leftCol.className = "left-col";
+
         const ratingSpan = document.createElement("span");
         ratingSpan.className = "rating";
         ratingSpan.textContent = rating;
@@ -757,55 +799,39 @@
         const nameSpan = document.createElement("span");
         nameSpan.className = "name";
         nameSpan.textContent = name;
+        nameSpan.title = name;
+
+        leftCol.appendChild(ratingSpan);
+        leftCol.appendChild(nameSpan);
+
+        const row1 = document.createElement("div");
+        row1.className = "row1";
 
         const raritySpan = document.createElement("span");
         raritySpan.className = "rarity " + rarity.class;
         raritySpan.textContent = rarity.name;
+
+        row1.appendChild(raritySpan);
+
+        const row2 = document.createElement("div");
+        row2.className = "row2";
+
+        const priceSpan = document.createElement("span");
+        priceSpan.className = "price";
+        const price = this.priceMap ? this.getPlayerPrice(player) : null;
+        priceSpan.textContent = price != null && price > 0 ? price.toLocaleString() : "";
 
         const tradeableSpan = document.createElement("span");
         tradeableSpan.className = "tradeable-badge " + (isTradable ? "tradeable-yes" : "tradeable-no");
         tradeableSpan.textContent = isTradable ? "💰" : "🔒";
         tradeableSpan.title = isTradable ? "可交易" : "不可交易";
 
-        // 调试按钮
-        const debugBtn = document.createElement("span");
-        debugBtn.className = "debug-btn";
-        debugBtn.textContent = "+";
-        debugBtn.style.cssText = "cursor:pointer;color:#f6b803;font-weight:bold;margin-left:6px;font-size:14px;";
-        debugBtn.onclick = () => {
-          const rawItem = player._item;
-          let debugText = `球员调试信息\n\n名称: ${name}\n评分: ${player.rating}\n位置: ${player.position}\n稀有度: ${player.rarityName}\n\n`;
-          debugText += `rawData keys: ${Object.keys(rawItem || {}).slice(0, 30).join(", ")}\n\n`;
-          if (rawItem) {
-            // 提取可用字段
-            const fields = {};
-            for (const key of Object.keys(rawItem)) {
-              const val = rawItem[key];
-              if (val === null || val === undefined) {
-                fields[key] = String(val);
-              } else if (typeof val === 'function') {
-                continue;
-              } else if (typeof val === 'object') {
-                try {
-                  fields[key] = JSON.stringify(val).substring(0, 100);
-                } catch(e) {
-                  fields[key] = '[Circular/Complex]';
-                }
-              } else {
-                fields[key] = String(val);
-              }
-            }
-            debugText += "字段值:\n" + Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join("\n");
-          }
-          prompt("球员调试信息 (Ctrl+C 复制)", debugText);
-          console.log("[EAFC Grinder DEBUG] groups:", rawItem?.groups, "rareflag:", rawItem?.rareflag, "subtype:", rawItem?.subtype);
-        };
+        row2.appendChild(priceSpan);
+        row2.appendChild(tradeableSpan);
 
-        item.appendChild(ratingSpan);
-        item.appendChild(nameSpan);
-        item.appendChild(raritySpan);
-        item.appendChild(tradeableSpan);
-        item.appendChild(debugBtn);
+        item.appendChild(leftCol);
+        item.appendChild(row1);
+        item.appendChild(row2);
         listContainer.appendChild(item);
       });
 
@@ -843,7 +869,6 @@
       pagination.appendChild(pageInfo);
       pagination.appendChild(nextBtn);
       panel.appendChild(pagination);
-      panel.appendChild(toggleBtn);
 
       document.body.appendChild(panel);
 
@@ -859,8 +884,7 @@
 
       const onMouseDown = (e) => {
         // 如果点击的是按钮，不拖拽
-        if (e.target.classList.contains("grinder-close-btn") ||
-            e.target.classList.contains("grinder-toggle-btn") ||
+        if (e.target.classList.contains("grinder-toggle-btn") ||
             e.target.tagName === "BUTTON") {
           return;
         }
@@ -1006,6 +1030,7 @@
 
               self.priceMap = priceJson;
               console.log("[EAFC Grinder] 价格映射已更新, 共", Object.keys(priceJson).length, "个评分");
+              self.renderPanel();
             } catch (e) {
               console.warn("[EAFC Grinder] 解析价格数据失败:", e);
             }
@@ -1883,9 +1908,9 @@
         return this.specialPriceMap[p.definitionId] || p._item?._itemPriceLimits?.maximum || 999999;
       }
       if (pricesByRating) {
-        return (pricesByRating[p.rating] || [])[0] || this.priceMap[p.rating] || p.rating * 10;
+        return (pricesByRating[p.rating] || [])[0] || (this.priceMap && this.priceMap[p.rating]) || p.rating * 10;
       }
-      const market = this.priceMap[p.rating];
+      const market = this.priceMap ? this.priceMap[p.rating] : null;
       const minPrice = p._item?._itemPriceLimits?.minimum || 0;
       if (market != null && market > 0) return Math.max(market, minPrice);
       return minPrice || p.rating * 10;

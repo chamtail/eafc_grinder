@@ -1580,6 +1580,27 @@
         }
       }
 
+      // 将 count === minPlayers 的 ratingRanges 条件提升为硬过滤
+      if (requirements.ratingRanges && requirements.minPlayers > 0) {
+        for (const range of requirements.ratingRanges) {
+          if (range.count !== requirements.minPlayers) continue;
+          // 该条件每个空位都必须满足，提升为硬约束
+          eligible = eligible.filter(p => {
+            let minR = range.min || 0;
+            let maxR = range.max || 999;
+            if (range.quality === 1) { minR = 0; maxR = 64; }
+            else if (range.quality === 2) { minR = 65; maxR = 74; }
+            else if (range.quality === 3) { minR = 75; maxR = 99; }
+            if (p.rating < minR || p.rating > maxR) return false;
+            if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
+            if (range.leagues && !range.leagues.includes(p.leagueId)) return false;
+            if (range.nations && !range.nations.includes(p.nationId)) return false;
+            if (range.clubs && !range.clubs.includes(p.teamId)) return false;
+            return true;
+          });
+        }
+      }
+
       // 如果没有评分范围需求，使用简单的全局过滤
       if (requirements.ratingRanges.length === 0) {
         if (requirements.requiredLeague) {
@@ -1885,11 +1906,31 @@
 
       const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
       const seenIds = new Set();
-      const uniquePlayers = allPlayers.filter(p => {
+      let uniquePlayers = allPlayers.filter(p => {
         if (seenIds.has(p.id)) return false;
         seenIds.add(p.id);
         return true;
       });
+
+      // 将 count === totalSlots 的 ratingRanges 条件提升为硬过滤
+      if (ratingRanges && ratingRanges.length > 0) {
+        for (const range of ratingRanges) {
+          if (range.count !== totalSlots) continue;
+          let minR = range.min || 0;
+          let maxR = range.max || 999;
+          if (range.quality === 1) { minR = 0; maxR = 64; }
+          else if (range.quality === 2) { minR = 65; maxR = 74; }
+          else if (range.quality === 3) { minR = 75; maxR = 99; }
+          uniquePlayers = uniquePlayers.filter(p => {
+            if (p.rating < minR || p.rating > maxR) return false;
+            if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
+            if (range.leagues && !range.leagues.includes(p.leagueId)) return false;
+            if (range.nations && !range.nations.includes(p.nationId)) return false;
+            if (range.clubs && !range.clubs.includes(p.teamId)) return false;
+            return true;
+          });
+        }
+      }
 
       // 辅助：计算纯金卡方案的最优评分组合和总价
       const calcBestNormalCombo = (slots, fixedRatings) => {

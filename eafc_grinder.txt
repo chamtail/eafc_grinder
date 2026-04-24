@@ -1831,9 +1831,13 @@
       const countByRating = {};
       const pricesByRating = {}; // 每个评分下所有卡的有效价格列表，从低到高排序
       const seenIds = new Set();
+      const seenMetaIds = new Set();
       allPlayers.forEach(p => {
         if (seenIds.has(p.id)) return;
+        const mid = p._item?._metaData?.id;
+        if (mid != null && seenMetaIds.has(mid)) return;
         seenIds.add(p.id);
+        if (mid != null) seenMetaIds.add(mid);
         const r = p.rating || 0;
         if (r <= 0) return;
         // 特殊卡（rareflag > 1）不纳入普通填充库存统计
@@ -1906,9 +1910,13 @@
 
       const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
       const seenIds = new Set();
+      const seenMetaIds = new Set();
       let uniquePlayers = allPlayers.filter(p => {
         if (seenIds.has(p.id)) return false;
+        const mid = p._item?._metaData?.id;
+        if (mid != null && seenMetaIds.has(mid)) return false;
         seenIds.add(p.id);
+        if (mid != null) seenMetaIds.add(mid);
         return true;
       });
 

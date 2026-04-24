@@ -29,6 +29,7 @@
     currentChallenge: null, // 当前SBC挑战
     priceMap: null,
     specialPriceMap: {},
+    _fetchingDefIds: new Set(),
     _priceMapTimer: null,
     _specialPriceTimer: null,
 
@@ -1071,6 +1072,11 @@
 
     _fetchSpecialPricesForPlayers(players) {
       const self = this;
+      // 过滤掉已有价格或正在请求中的
+      players = players.filter(p => !self.specialPriceMap[p.definitionId] && !self._fetchingDefIds.has(p.definitionId));
+      if (players.length === 0) return;
+      // 立即标记为请求中，防止并发重复
+      players.forEach(p => self._fetchingDefIds.add(p.definitionId));
       let platform = "ps";
       try {
         const user = services.User.getUser().getSelectedPersona();
@@ -1116,11 +1122,13 @@
               const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
               self.specialPriceMap[p.definitionId] = maxPrice;
             }
+            self._fetchingDefIds.delete(p.definitionId);
             resolve();
           },
           onerror() {
             const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
             self.specialPriceMap[p.definitionId] = maxPrice;
+            self._fetchingDefIds.delete(p.definitionId);
             resolve();
           }
         });
@@ -1147,7 +1155,7 @@
       const missing = [];
       const seenDefIds = new Set();
       allPlayers.forEach(p => {
-        if (p.rareflag > 1 && p.definitionId && !this.specialPriceMap[p.definitionId] && !seenDefIds.has(p.definitionId)) {
+        if (p.rareflag > 1 && p.definitionId && !this.specialPriceMap[p.definitionId] && !this._fetchingDefIds.has(p.definitionId) && !seenDefIds.has(p.definitionId)) {
           seenDefIds.add(p.definitionId);
           missing.push(p);
         }

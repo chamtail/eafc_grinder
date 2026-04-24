@@ -339,32 +339,31 @@
         } catch (e) {}
       }
 
-      // 方法3：监听 repositories.Item storage 缓存重置
-      if (repositories.Item && repositories.Item.storage && repositories.Item.storage.items) {
+      // 方法3：监听 repositories.Item storage 缓存重置（尝试，不一定触发）
+      if (repositories.Item && repositories.Item.storage && repositories.Item.storage.reset) {
         try {
-          const originalReset = repositories.Item.storage.items.reset;
-          if (originalReset) {
-            repositories.Item.storage.items.reset = function(...args) {
-              const result = originalReset.apply(this, args);
-              setTimeout(() => self.autoRefreshPanel(), 100);
-              return result;
-            };
-          }
+          const originalReset = repositories.Item.storage.reset;
+          repositories.Item.storage.reset = function(...args) {
+            const result = originalReset.apply(this, args);
+            setTimeout(() => self.autoRefreshPanel(), 100);
+            return result;
+          };
         } catch (e) {}
       }
 
       // 方法4：定时检查球员数量变化（兜底方案）
+      let initialized = false;
       setInterval(() => {
         try {
-          const clubCount = repositories.Item?.club?.items?.values?.().length || 0;
-          const storageCount = repositories.Item?.storage?.items?.values?.().length || 0;
-          if ((clubCount !== lastClubCount && lastClubCount > 0) ||
-              (storageCount !== lastStorageCount && lastStorageCount > 0)) {
+          const clubCount = repositories.Item?.club?.items?.length || 0;
+          const storageCount = repositories.Item?.storage?.length || 0;
+          if (initialized && (clubCount !== lastClubCount || storageCount !== lastStorageCount)) {
             console.log(`[EAFC Grinder] 检测到球员变化 (俱乐部: ${lastClubCount} → ${clubCount}, 仓库: ${lastStorageCount} → ${storageCount})，刷新面板...`);
             self.autoRefreshPanel();
           }
           lastClubCount = clubCount;
           lastStorageCount = storageCount;
+          initialized = true;
         } catch (e) {}
       }, 3000);
 

@@ -298,6 +298,45 @@
         min-width: 18px;
         text-align: center;
       }
+      .grinder-loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.7);
+        z-index: 9999999;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        color: #fff;
+        font-family: 'UltimateTeam', sans-serif;
+      }
+      .grinder-loading-overlay .loading-text {
+        font-size: 18px;
+        margin-bottom: 16px;
+        color: #f6b803;
+      }
+      .grinder-loading-overlay .loading-bar-bg {
+        width: 300px;
+        height: 8px;
+        background: rgba(255,255,255,0.15);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .grinder-loading-overlay .loading-bar-fill {
+        height: 100%;
+        background: #f6b803;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+        width: 0%;
+      }
+      .grinder-loading-overlay .loading-detail {
+        font-size: 12px;
+        color: #a4a9b4;
+        margin-top: 10px;
+      }
     `,
 
     init() {
@@ -411,11 +450,32 @@
         const totalPlayers = playerStats.count;
         console.log(`[EAFC Grinder] 俱乐部共有 ${totalPlayers} 名球员，开始全量加载...`);
 
-        // 分页加载俱乐部球员，每页200人
+        // 创建加载遮罩
+        const overlay = document.createElement("div");
+        overlay.className = "grinder-loading-overlay";
+        overlay.innerHTML = `
+          <div class="loading-text">正在加载球员数据...</div>
+          <div class="loading-bar-bg"><div class="loading-bar-fill"></div></div>
+          <div class="loading-detail">0%</div>
+        `;
+        document.body.appendChild(overlay);
+        const barFill = overlay.querySelector(".loading-bar-fill");
+        const detailEl = overlay.querySelector(".loading-detail");
+        let pagesLoaded = 0;
+
+        const updateProgress = () => {
+          pagesLoaded++;
+          const pct = Math.min(100, Math.round(pagesLoaded / totalPages * 100));
+          barFill.style.width = pct + "%";
+          detailEl.textContent = pct + "%";
+        };
+
+        // 分页加载俱乐部球员，每页200人，并发
         const batchSize = 200;
         const totalPages = Math.ceil(totalPlayers / batchSize);
+        const CONCURRENCY = 8;
 
-        for (let page = 0; page < totalPages; page++) {
+        const fetchPage = (page) => new Promise((resolve, reject) => {
           const criteria = new UTSearchCriteriaDTO();
           criteria.type = "player";
           criteria.sortBy = "ovr";
@@ -423,19 +483,24 @@
           criteria.count = batchSize;
           criteria.offset = page * batchSize;
 
-          await new Promise((resolve, reject) => {
-            services.Club.search(criteria).observe(current, (obs, res) => {
-              obs.unobserve(current);
-              if (res.success && JSUtils.isObject(res.response)) {
-                console.log(`[EAFC Grinder] 已加载俱乐部第 ${page + 1}/${totalPages} 页 (${res.response.items?.length || 0} 名球员)`);
-                resolve(res.response);
-              } else {
-                reject(new Error("搜索失败"));
-              }
-            });
+          services.Club.search(criteria).observe(current, (obs, res) => {
+            obs.unobserve(current);
+            if (res.success && JSUtils.isObject(res.response)) {
+              console.log(`[EAFC Grinder] 已加载俱乐部第 ${page + 1}/${totalPages} 页 (${res.response.items?.length || 0} 名球员)`);
+              updateProgress();
+              resolve(res.response);
+            } else {
+              reject(new Error("搜索失败"));
+            }
           });
+        });
 
-          await this.wait(0.2, 0.3);
+        for (let i = 0; i < totalPages; i += CONCURRENCY) {
+          const pageBatch = [];
+          for (let j = i; j < Math.min(i + CONCURRENCY, totalPages); j++) {
+            pageBatch.push(fetchPage(j));
+          }
+          await Promise.all(pageBatch);
         }
 
         console.log(`[EAFC Grinder] 俱乐部加载完成，共 ${totalPlayers} 名球员`);
@@ -443,12 +508,17 @@
         // 加载重复仓库（storage pile）
         await this.loadStoragePlayers();
 
+        // 移除遮罩
+        overlay.remove();
+
         this.showPlayerPanel();
         this.initSBCFillButton();
         this.fetchPriceMap();
         this.initSpecialPriceTimer();
 
       } catch (error) {
+        const overlay = document.querySelector(".grinder-loading-overlay");
+        if (overlay) overlay.remove();
         console.error("[EAFC Grinder] 加载球员时出错:", error);
       }
     },

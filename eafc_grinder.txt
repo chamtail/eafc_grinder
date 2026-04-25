@@ -8,6 +8,8 @@
 // @match        https://www.easports.com/*/ea-sports-fc/ultimate-team/web-app/*
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      futbin.org
 // @run-at       document-end
 // ==/UserScript==
@@ -24,12 +26,13 @@
     totalPages: 0,
     collapsed: false,
     currentTab: "club", // "club" or "storage"
-    panelPosition: { left: 0, right: 10, top: 60 },
+    panelPosition: { left: 0, right: 0, top: 0 },
     sbcFillButton: null, // SBC填充按钮
     currentChallenge: null, // 当前SBC挑战
     priceMap: null,
     specialPriceMap: {},
     _fetchingDefIds: new Set(),
+    _noPriceDefIds: new Set(),
     _priceMapTimer: null,
     _specialPriceTimer: null,
 
@@ -44,7 +47,7 @@
         color: #fff;
         border-radius: 8px;
         padding: 10px;
-        width: 260px;
+        width: 290px;
         max-height: 600px;
         overflow: hidden;
         font-family: 'UltimateTeam', sans-serif;
@@ -628,8 +631,8 @@
         rating: item.rating || item.overallRating || 0,
         position: item.prefPos || item.position || "",
         positions: item.basePossiblePositions || item.possiblePositions || [],
-        rareflag: item.rareflag,
-        rarityName: this.getRarityName(item.rareflag).name,
+        rareflag: item.rareflag != null ? item.rareflag : (item._rareflag || 0),
+        rarityName: this.getRarityName(item.rareflag != null ? item.rareflag : (item._rareflag || 0)).name,
         leagueId: item.leagueId || 0,
         leagueName: this.getLeagueName(item.leagueId),
         nationId: item.nationId || 0,
@@ -749,9 +752,6 @@
         this.players = this.getStoragePlayers();
       }
       this.totalPages = Math.ceil(this.players.length / this.pageSize);
-
-      // 检查是否有新的特殊卡需要查价格
-      this.fetchMissingSpecialPrices();
 
       const panel = document.createElement("div");
       panel.className = "grinder-panel" + (this.collapsed ? " collapsed" : "");
@@ -888,8 +888,8 @@
 
         const priceSpan = document.createElement("span");
         priceSpan.className = "price";
-        const price = this.priceMap ? this.getPlayerPrice(player) : null;
-        priceSpan.textContent = price != null && price > 0 ? price.toLocaleString() : "";
+        const price = this.priceMap ? this.getPlayerRealPrice(player) : null;
+        priceSpan.textContent = price != null && price > 0 ? price.toLocaleString() : "N/A";
 
         const tradeableSpan = document.createElement("span");
         tradeableSpan.className = "tradeable-badge " + (isTradable ? "tradeable-yes" : "tradeable-no");
@@ -958,6 +958,9 @@
 
       // 添加拖拽功能
       this.makeDraggable(panel);
+
+      // 按需查价：对当前页没价格的特殊卡触发查询
+      this.fetchPricesOnDemand(pagePlayers);
     },
 
     makeDraggable(element) {
@@ -1132,32 +1135,142 @@
     },
 
     // 获取库存中特殊卡的市场价格，存入 specialPriceMap
+    // 已改为按需查询，初始化时不再全量查价
     initSpecialPriceTimer() {
+      // 不再自动全量查价，改为打开球员面板时按需查询
+    },
+
+    // 按需查价：对当前页没价格的特殊卡触发查询
+    fetchPricesOnDemand(pagePlayers) {
       const self = this;
-      const doFetch = () => {
-        const allPlayers = [...self.getClubPlayers(), ...self.getStoragePlayers()];
-        const specialPlayers = [];
-        const seenDefIds = new Set();
-        allPlayers.forEach(p => {
-          if (p.rareflag > 1 && p.definitionId && !seenDefIds.has(p.definitionId)) {
-            seenDefIds.add(p.definitionId);
-            specialPlayers.push(p);
-          }
-        });
-        if (specialPlayers.length === 0) return;
-        console.log("[EAFC Grinder] 开始全量刷新特殊卡价格，共", specialPlayers.length, "张");
-        self._fetchSpecialPricesForPlayers(specialPlayers);
+      const missing = pagePlayers.filter(p => {
+        if (p.rareflag <= 1) return false; // 只查特殊卡
+        if (this.specialPriceMap[p.definitionId]) return false; // 已有价格
+        if (this._noPriceDefIds.has(p.definitionId)) return false; // 已确认无价格
+        if (this._onDemandFetching && this._onDemandFetching.has(p.definitionId)) return false; // 避免重复
+        return true;
+      });
+      if (missing.length === 0) return;
+
+      // 标记正在查询
+      if (!this._onDemandFetching) this._onDemandFetching = new Set();
+      missing.forEach(p => this._onDemandFetching.add(p.definitionId));
+
+      // 按 metaData.id 分组
+      const groupsByPlayerId = {};
+      missing.forEach(p => {
+        const playerId = p._item?._metaData?.id;
+        if (!playerId) return;
+        if (!groupsByPlayerId[playerId]) groupsByPlayerId[playerId] = [];
+        groupsByPlayerId[playerId].push(p);
+      });
+
+      const year = typeof APP_YEAR_SHORT !== "undefined" ? APP_YEAR_SHORT : "25";
+      let platform = "ps";
+      try {
+        const user = services.User.getUser().getSelectedPersona();
+        if (!user.isXbox && !user.isPlaystation && !user.isStadia) platform = "pc";
+      } catch (e) {}
+      const priceKey = platform === "pc" ? "pc_LCPrice" : "ps_LCPrice";
+      const platformParam = platform === "pc" ? "PC" : "PS";
+
+      // 加载 futbinIdMap
+      let futbinIdMap = {};
+      try { futbinIdMap = JSON.parse(GM_getValue("futbinIdMap", "{}")) || {}; } catch(e) {}
+      const saveFutbinIdMap = () => {
+        try { GM_setValue("futbinIdMap", JSON.stringify(futbinIdMap)); } catch(e) {}
       };
-      this._specialPriceTimer = setTimeout(() => {
-        doFetch();
-        this._specialPriceTimer = setInterval(doFetch, 30 * 60 * 1000);
-      }, 30 * 60 * 1000);
+
+      // 获取所有库存球员的 definitionId 集合
+      const allClubDefIds = new Set(this.getClubPlayers().map(p => p.definitionId));
+      const allStorageDefIds = new Set(this.getStoragePlayers().map(p => p.definitionId));
+      const allMyDefIds = new Set([...allClubDefIds, ...allStorageDefIds]);
+
+      const playerIds = Object.keys(groupsByPlayerId);
+      let completed = 0;
+
+      // 查询并更新
+      playerIds.forEach((pid, idx) => {
+        const ps = groupsByPlayerId[pid];
+        const cached = ps.find(p => futbinIdMap[p.definitionId]);
+        const cachedFutbinId = cached ? futbinIdMap[cached.definitionId] : null;
+
+        const onDone = () => {
+          completed++;
+          ps.forEach(p => {
+            self._onDemandFetching.delete(p.definitionId);
+            // 查完还是没有价格的，标记为已确认无价格，避免下次重复查
+            if (!self.specialPriceMap[p.definitionId]) {
+              self._noPriceDefIds.add(p.definitionId);
+            }
+          });
+          // 全部完成后刷新一次面板
+          if (completed === playerIds.length) {
+            self.renderPanel();
+          }
+        };
+
+        if (cachedFutbinId) {
+          const url = `https://www.futbin.org/futbin/api/${year}/fetchPlayerInformationMinimal?ID=${cachedFutbinId}&platform=${platformParam}`;
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            onload(res) {
+              try {
+                const data = JSON.parse(res.response);
+                if (data.data && Array.isArray(data.data)) {
+                  data.data.forEach(item => {
+                    const price = item.LCPrice || item[priceKey] || item.price || 0;
+                    const defId = item.Player_Resource;
+                    if (defId && price > 0 && allMyDefIds.has(defId)) {
+                      self.specialPriceMap[defId] = price;
+                    }
+                  });
+                }
+              } catch (e) {}
+              onDone();
+            },
+            onerror() {
+              onDone();
+            }
+          });
+        } else {
+          const p = ps[0];
+          const url = `https://www.futbin.org/futbin/api/${year}/getFilteredPlayers?platform=${platformParam}&nation=${p.nationId}&league=${p.leagueId}&rating=${p.rating}-${p.rating}&club=${p.teamId}&sort=rating&order=desc&page=1`;
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            onload(res) {
+              try {
+                const data = JSON.parse(res.response);
+                if (data.data && Array.isArray(data.data)) {
+                  data.data.forEach(item => {
+                    if (item.resource_id && item.ID) {
+                      futbinIdMap[item.resource_id] = item.ID;
+                    }
+                    const price = item[priceKey] || 0;
+                    const defId = item.resource_id;
+                    if (defId && price > 0 && allMyDefIds.has(defId)) {
+                      self.specialPriceMap[defId] = price;
+                    }
+                  });
+                  saveFutbinIdMap();
+                }
+              } catch (e) {}
+              onDone();
+            },
+            onerror() {
+              onDone();
+            }
+          });
+        }
+      });
     },
 
     _fetchSpecialPricesForPlayers(players) {
       const self = this;
       // 过滤掉已有价格或正在请求中的
-      players = players.filter(p => !self.specialPriceMap[p.definitionId] && !self._fetchingDefIds.has(p.definitionId));
+      players = players.filter(p => !self.specialPriceMap[p.definitionId] && !self._fetchingDefIds.has(p.definitionId) && !self._noPriceDefIds.has(p.definitionId));
       if (players.length === 0) return;
       // 立即标记为请求中，防止并发重复
       players.forEach(p => self._fetchingDefIds.add(p.definitionId));
@@ -1168,67 +1281,189 @@
       } catch (e) {}
       const year = typeof APP_YEAR_SHORT !== "undefined" ? APP_YEAR_SHORT : "25";
       const priceKey = platform === "pc" ? "pc_LCPrice" : "ps_LCPrice";
+      const platformParam = platform === "pc" ? "PC" : "PS";
 
-      const fetchOne = (p) => new Promise((resolve) => {
-        const url = "https://www.futbin.org/futbin/api/" + year +
-          "/getFilteredPlayers?platform=" + (platform === "pc" ? "PC" : "PS") +
-          "&nation=" + p.nationId +
-          "&league=" + p.leagueId +
-          "&rating=" + p.rating + "-" + p.rating +
-          "&club=" + p.teamId +
-          "&sort=rating&order=desc&page=1";
-        GM_xmlhttpRequest({
-          method: "GET",
-          url: url,
-          onload(res) {
-            try {
-              const data = JSON.parse(res.response);
-              if (data.data && data.data.length) {
-                const match = data.data.find(item => item.resource_id === p.definitionId);
-                if (match) {
-                  const price = match[priceKey] || 0;
-                  if (price > 0) {
-                    self.specialPriceMap[p.definitionId] = price;
-                  } else {
-                    const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
-                    self.specialPriceMap[p.definitionId] = maxPrice;
-                  }
+      // 加载 futbinId 缓存: definitionId -> futbinId
+      let futbinIdMap = {};
+      try { futbinIdMap = JSON.parse(GM_getValue("futbinIdMap", "{}")) || {}; } catch(e) {}
+      const saveFutbinIdMap = () => {
+        try {
+          GM_setValue("futbinIdMap", JSON.stringify(futbinIdMap));
+          console.log(`[EAFC Grinder] futbinIdMap已保存, 共${Object.keys(futbinIdMap).length}条`);
+        } catch(e) {
+          console.error(`[EAFC Grinder] futbinIdMap保存失败:`, e);
+        }
+      };
+
+      // 按 metaData.id 分组（同一个球员的所有卡共享一次请求）
+      const groupsByPlayerId = {};
+      let cachedCount = 0, uncachedCount = 0;
+      players.forEach(p => {
+        const playerId = p._item?._metaData?.id;
+        if (!playerId) {
+          // 无 metaData.id 的单独处理
+          uncachedCount++;
+          return;
+        }
+        const cachedFutbinId = futbinIdMap[p.definitionId];
+        if (cachedFutbinId) {
+          cachedCount++;
+        } else {
+          uncachedCount++;
+        }
+        if (!groupsByPlayerId[playerId]) groupsByPlayerId[playerId] = [];
+        groupsByPlayerId[playerId].push(p);
+      });
+      console.log(`[EAFC Grinder] 特殊卡查价: 共${players.length}张, 缓存命中${cachedCount}张, 无缓存${uncachedCount}张, 分${Object.keys(groupsByPlayerId).length}组`);
+
+      // 按球员分组请求
+      const fetchByPlayerId = (playerId, ps) => new Promise((resolve) => {
+        // 优先用组内有缓存 futbinId 的卡
+        const cached = ps.find(p => futbinIdMap[p.definitionId]);
+        const cachedFutbinId = cached ? futbinIdMap[cached.definitionId] : null;
+
+        if (cachedFutbinId) {
+          // 有缓存，用 fetchPlayerInformationMinimal
+          const url = "https://www.futbin.org/futbin/api/" + year +
+            "/fetchPlayerInformationMinimal?ID=" + cachedFutbinId + "&platform=" + platformParam;
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            onload(res) {
+              try {
+                const data = JSON.parse(res.response);
+                if (data.data && Array.isArray(data.data) && data.data.length) {
+                  console.log(`[EAFC Grinder] fetchPlayerInfo playerId=${playerId}, 返回${data.data.length}条`, data.data.map(i => ({Player_Resource: i.Player_Resource, ID: i.ID, LCPrice: i.LCPrice, rating: i.Player_Rating})));
+                  ps.forEach(p => {
+                    const item = data.data.find(i => String(i.Player_Resource) === String(p.definitionId));
+                    if (item) {
+                      const price = item.LCPrice || item[priceKey] || item.price || 0;
+                      if (price > 0) {
+                        self.specialPriceMap[p.definitionId] = price;
+                        console.log(`[EAFC Grinder] 写入价格: ${p.name} defId=${p.definitionId}, price=${price}`);
+                      } else {
+                        self._noPriceDefIds.add(p.definitionId);
+                      }
+                    } else {
+                      self._noPriceDefIds.add(p.definitionId);
+                    }
+                    self._fetchingDefIds.delete(p.definitionId);
+                  });
                 } else {
-                  const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
-                  self.specialPriceMap[p.definitionId] = maxPrice;
+                  ps.forEach(p => {
+                    self._noPriceDefIds.add(p.definitionId);
+                    self._fetchingDefIds.delete(p.definitionId);
+                  });
                 }
-              } else {
-                // 查不到数据，同样用最高价兜底
-                const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
-                self.specialPriceMap[p.definitionId] = maxPrice;
+              } catch (e) {
+                ps.forEach(p => {
+                  self._noPriceDefIds.add(p.definitionId);
+                  self._fetchingDefIds.delete(p.definitionId);
+                });
               }
-            } catch (e) {
-              const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
-              self.specialPriceMap[p.definitionId] = maxPrice;
+              resolve();
+            },
+            onerror() {
+              ps.forEach(p => {
+                self._noPriceDefIds.add(p.definitionId);
+                self._fetchingDefIds.delete(p.definitionId);
+              });
+              resolve();
             }
-            self._fetchingDefIds.delete(p.definitionId);
-            resolve();
-          },
-          onerror() {
-            const maxPrice = p._item?._itemPriceLimits?.maximum || 999999;
-            self.specialPriceMap[p.definitionId] = maxPrice;
-            self._fetchingDefIds.delete(p.definitionId);
-            resolve();
-          }
-        });
+          });
+        } else {
+          // 组内都无缓存，用第一张卡去 getFilteredPlayers 查询
+          const p = ps[0];
+          const url = "https://www.futbin.org/futbin/api/" + year +
+            "/getFilteredPlayers?platform=" + platformParam +
+            "&nation=" + p.nationId +
+            "&league=" + p.leagueId +
+            "&rating=" + p.rating + "-" + p.rating +
+            "&club=" + p.teamId +
+            "&sort=rating&order=desc&page=1";
+          GM_xmlhttpRequest({
+            method: "GET",
+            url: url,
+            onload(res) {
+              try {
+                const data = JSON.parse(res.response);
+                if (data.data && data.data.length) {
+                  console.log(`[EAFC Grinder] getFilteredPlayers playerId=${playerId}, 返回${data.data.length}条`);
+                  // 缓存所有返回的 futbinId
+                  data.data.forEach(item => {
+                    if (item.resource_id && item.ID) {
+                      futbinIdMap[item.resource_id] = item.ID;
+                    }
+                  });
+                  // 为组内每张卡匹配价格
+                  ps.forEach(p => {
+                    const match = data.data.find(item => String(item.resource_id) === String(p.definitionId));
+                    if (match) {
+                      const price = match[priceKey] || 0;
+                      if (price > 0) {
+                        self.specialPriceMap[p.definitionId] = price;
+                      }
+                      if (match.ID) {
+                        futbinIdMap[p.definitionId] = match.ID;
+                      }
+                    }
+                    self._fetchingDefIds.delete(p.definitionId);
+                    if (!self.specialPriceMap[p.definitionId]) {
+                      self._noPriceDefIds.add(p.definitionId);
+                    }
+                  });
+                  saveFutbinIdMap();
+                } else {
+                  ps.forEach(p => {
+                    self._noPriceDefIds.add(p.definitionId);
+                    self._fetchingDefIds.delete(p.definitionId);
+                  });
+                }
+              } catch (e) {
+                ps.forEach(p => {
+                  self._noPriceDefIds.add(p.definitionId);
+                  self._fetchingDefIds.delete(p.definitionId);
+                });
+              }
+              resolve();
+            },
+            onerror() {
+              ps.forEach(p => {
+                self._noPriceDefIds.add(p.definitionId);
+                self._fetchingDefIds.delete(p.definitionId);
+              });
+              resolve();
+            }
+          });
+        }
       });
 
-      const BATCH_SIZE = 5;
+      const BATCH_SIZE = 8;
       const BATCH_DELAY = 1000;
       const runBatches = async () => {
-        for (let i = 0; i < players.length; i += BATCH_SIZE) {
-          const batch = players.slice(i, i + BATCH_SIZE);
-          await Promise.all(batch.map(fetchOne));
-          if (i + BATCH_SIZE < players.length) {
-            await new Promise(r => setTimeout(r, BATCH_DELAY));
+        try {
+          const playerIds = Object.keys(groupsByPlayerId);
+          let processed = 0;
+          const totalBatches = Math.ceil(playerIds.length / BATCH_SIZE);
+
+          for (let i = 0; i < playerIds.length; i += BATCH_SIZE) {
+            const batchIds = playerIds.slice(i, i + BATCH_SIZE);
+            await Promise.all(batchIds.map(id => fetchByPlayerId(id, groupsByPlayerId[id])));
+            processed += batchIds.reduce((sum, id) => sum + groupsByPlayerId[id].length, 0);
+            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+            if (batchNum % 10 === 0 || batchNum === totalBatches) {
+              console.log(`[EAFC Grinder] 特殊卡价格进度: ${processed}/${players.length}`);
+            }
+            if (i + BATCH_SIZE < playerIds.length) {
+              await new Promise(r => setTimeout(r, BATCH_DELAY));
+            }
           }
+
+          console.log("[EAFC Grinder] 特殊卡价格更新完成，本次获取", players.length, "条");
+          self.renderPanel();
+        } catch (e) {
+          console.error("[EAFC Grinder] 特殊卡价格更新出错:", e);
         }
-        console.log("[EAFC Grinder] 特殊卡价格更新完成，本次获取", players.length, "条");
       };
       runBatches();
     },
@@ -1239,7 +1474,7 @@
       const missing = [];
       const seenDefIds = new Set();
       allPlayers.forEach(p => {
-        if (p.rareflag > 1 && p.definitionId && !this.specialPriceMap[p.definitionId] && !this._fetchingDefIds.has(p.definitionId) && !seenDefIds.has(p.definitionId)) {
+        if (p.rareflag > 1 && p.definitionId && !this.specialPriceMap[p.definitionId] && !this._fetchingDefIds.has(p.definitionId) && !this._noPriceDefIds.has(p.definitionId) && !seenDefIds.has(p.definitionId)) {
           seenDefIds.add(p.definitionId);
           missing.push(p);
         }
@@ -1994,6 +2229,14 @@
     },
 
     // 获取单个球员的正确估算价格（特殊卡优先用 specialPriceMap / maximum）
+    // 获取球员真实价格（无兜底），用于显示；特殊卡没查到futbin价格返回null
+    getPlayerRealPrice(p) {
+      if (p.rareflag > 1) {
+        return this.specialPriceMap[p.definitionId] || null;
+      }
+      return this.getPlayerPrice(p);
+    },
+
     getPlayerPrice(p, pricesByRating) {
       if (p.rareflag > 1) {
         return this.specialPriceMap[p.definitionId] || p._item?._itemPriceLimits?.maximum || 999999;

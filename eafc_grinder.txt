@@ -541,7 +541,7 @@
 
         this.showPlayerPanel();
         this.initSBCFillButton();
-        this.initSpecialPriceTimer();
+        this.initPriceCache();
 
       } catch (error) {
         const overlay = document.querySelector(".grinder-loading-overlay");
@@ -965,7 +965,7 @@
         const price = this.getPlayerRealPrice(player);
         if (price != null && price > 0) {
           priceSpan.textContent = price.toLocaleString();
-        } else if (this.priceCacheMap[player.definitionId] === undefined) {
+        } else if (!(player.definitionId in this.priceCacheMap)) {
           // 尚未查到价格，显示获取中
           priceSpan.textContent = "价格获取中...";
           priceSpan.classList.add("price-loading");
@@ -1222,13 +1222,50 @@
       this._priceMapTimer = setInterval(doFetch, 30 * 60 * 1000);
     },
 
-    // 获取所有卡的市场价格，存入 priceCacheMap
-    // 初始化时自动开始分页获取所有卡价格
-    initSpecialPriceTimer() {
+    // 初始化价格缓存：从后端全量接口一次性加载所有价格
+    initPriceCache() {
       const self = this;
-      this._fetchAllSpecialPrices();
+      this._loadAllPrices();
       if (this._specialPriceTimer) clearInterval(this._specialPriceTimer);
-      this._specialPriceTimer = setInterval(() => this._fetchAllSpecialPrices(), 30 * 60 * 1000);
+      this._specialPriceTimer = setInterval(() => this._loadAllPrices(), 30 * 60 * 1000);
+    },
+
+    // 从后端全量接口加载所有价格到 priceCacheMap
+    _loadAllPrices() {
+      const self = this;
+      const platform = this._getPlatform();
+      const url = this._getAllPricesUrl() + "?platform=" + platform;
+      console.log("[EAFC Grinder] 开始加载全量价格数据...");
+      const reqStart = performance.now();
+
+      GM_xmlhttpRequest({
+        method: "GET",
+        url: url,
+        headers: { "ngrok-skip-browser-warning": "true" },
+        onload(res) {
+          const reqTime = Math.round(performance.now() - reqStart);
+          if (res.status === 503) {
+            console.warn(`[EAFC Grinder] 全量价格接口返回 503（服务器预热中），${reqTime}ms`);
+            return;
+          }
+          try {
+            const data = JSON.parse(res.response);
+            if (data.prices) {
+              const count = Object.keys(data.prices).length;
+              Object.entries(data.prices).forEach(([id, price]) => {
+                self.priceCacheMap[Number(id)] = (price && price > 0) ? price : 0;
+              });
+              console.log(`[EAFC Grinder] 全量价格加载完成: ${count} 张卡, ${reqTime}ms`);
+              self.renderPanel();
+            }
+          } catch (e) {
+            console.error("[EAFC Grinder] 全量价格加载失败:", e);
+          }
+        },
+        onerror() {
+          console.error("[EAFC Grinder] 全量价格请求失败");
+        }
+      });
     },
 
     // 未分配球员价格显示 - 在 EA 原生未分配列表中注入价格标签
@@ -1268,14 +1305,10 @@
         const players = [];
         try {
           const unassignedRepo = repositories?.Item?.unassigned;
-          console.log("[EAFC Grinder] 未分配仓库对象:", unassignedRepo);
           if (!unassignedRepo) return players;
 
           const iterator = unassignedRepo.values();
-          console.log("[EAFC Grinder] unassigned.values():", iterator);
           if (!iterator) return players;
-
-          console.log("[EAFC Grinder] values() 长度:", iterator.length);
 
           for (let i = 0; i < iterator.length; i++) {
             const item = iterator[i];
@@ -1286,26 +1319,169 @@
         } catch (e) {
           console.warn("[EAFC Grinder] 获取未分配球员失败:", e);
         }
-        console.log("[EAFC Grinder] 获取到未分配球员数量:", players.length);
         return players;
       }
 
       // 为未分配球员批量查价
-      async function fetchUnassignedPrices() {
-        if (isFetching) {
-          console.log("[EAFC Grinder] 未分配查价进行中，跳过");
-          return;
-        }
+      async function fetchUnassignedPrices(unassignedItems, needPrice) {
         isFetching = true;
 
-        const unassignedItems = getUnassignedPlayers();
-        if (unassignedItems.length === 0) {
-          console.log("[EAFC Grinder] 未分配列表为空，跳过查价");
-          isFetching = false;
-          return;
+        const platform = self._getPlatform();
+        const defIds = needPrice.map(p => Number(p.definitionId));
+        needPrice.forEach(p => self._fetchingDefIds.add(Number(p.definitionId)));
+
+        // 构建 players 对象（futbin 兜底需要球员属性）
+        const players = {};
+        needPrice.forEach(p => {
+          players[p.definitionId] = {
+            nationId: p.nationId,
+            leagueId: p.leagueId,
+            teamId: p.teamId,
+            rating: p.rating
+          };
+        });
+
+        const reqStart = performance.now();
+        console.log(`[EAFC Grinder] 发送未分配查价请求: ${defIds.length} 个ID...`);
+
+        await new Promise((resolve) => {
+          GM_xmlhttpRequest({
+            method: "POST",
+            url: self._getPriceServerUrl(),
+            headers: { "Content-Type": "application/json" },
+            data: JSON.stringify({ definitionIds: defIds, platform: platform, players: players }),
+            onload(res) {
+              const reqTime = Math.round(performance.now() - reqStart);
+              console.log(`[EAFC Grinder] 未分配查价响应 (${reqTime}ms), status: ${res.status}`);
+              try {
+                const data = JSON.parse(res.response);
+                if (data.prices) {
+                  Object.entries(data.prices).forEach(([defId, result]) => {
+                    const price = result.price;
+                    self.priceCacheMap[Number(defId)] = (price && price > 0) ? price : 0;
+                    self._fetchingDefIds.delete(Number(defId));
+                  });
+                }
+              } catch (e) {
+                console.error("[EAFC Grinder] 未分配查价失败:", e);
+                defIds.forEach(id => self._fetchingDefIds.delete(id));
+              }
+              resolve();
+            },
+            onerror() {
+              console.error("[EAFC Grinder] 未分配查价请求失败");
+              defIds.forEach(id => self._fetchingDefIds.delete(id));
+              resolve();
+            }
+          });
+        });
+
+        console.log("[EAFC Grinder] 未分配查价完成，更新DOM...");
+        injectPricesToDOM(unassignedItems);
+        isFetching = false;
+      }
+
+      // 在 DOM 中注入价格标签 - 通过 rating+name+nationId+leagueId+teamId+6stats 匹配
+      function injectPricesToDOM(unassignedItems) {
+        // 构建 item 查找表: key = "rating|name|nationId|leagueId|teamId|pac|sho|pas|dri|def|phy" -> [items]
+        const itemMap = {};
+        unassignedItems.forEach(item => {
+          const knownAs = item._staticData?.knownAs || '';
+          const lastName = item._staticData?.lastName || item.lastName || '';
+          const name = (knownAs && knownAs !== '---') ? knownAs : lastName;
+          const attrs = item.attributes || [];
+          const key = `${item.rating}|${name}|${item.nationId}|${item.leagueId}|${item.teamId}|${attrs[0]||''}|${attrs[1]||''}|${attrs[2]||''}|${attrs[3]||''}|${attrs[4]||''}|${attrs[5]||''}`;
+          if (!itemMap[key]) itemMap[key] = [];
+          itemMap[key].push(item);
+        });
+
+        // 从 DOM 元素提取匹配数据
+        function extractKeyFromLi(li) {
+          const rating = li.querySelector('.rating')?.textContent?.trim() || '';
+          const name = li.querySelector('.name')?.textContent?.trim() || '';
+          // 从图片 URL 提取 ID: flags/dark/14.png -> 14
+          const nationSrc = li.querySelector('img[src*="flags"]')?.getAttribute('src') || '';
+          const leagueSrc = li.querySelector('img[src*="leagues"]')?.getAttribute('src') || '';
+          const clubSrc = li.querySelector('img[src*="clubs"]')?.getAttribute('src') || '';
+          const nationId = nationSrc.match(/(\d+)\.png/)?.[1] || '';
+          const leagueId = leagueSrc.match(/(\d+)\.png/)?.[1] || '';
+          const teamId = clubSrc.match(/(\d+)\.png/)?.[1] || '';
+          // 6项小数据: PAC,SHO,PAS,DRI,DEF,PHY
+          const statLabels = ['PAC','SHO','PAS','DRI','DEF','PHY'];
+          const statValues = statLabels.map(label => {
+            const spans = li.querySelectorAll('.player-stats-data-component li');
+            for (const s of spans) {
+              const l = s.querySelector('.label');
+              const v = s.querySelector('.value');
+              if (l && v && l.textContent.trim() === label) return v.textContent.trim();
+            }
+            return '';
+          });
+          return `${rating}|${name}|${nationId}|${leagueId}|${teamId}|${statValues.join('|')}`;
         }
 
-        // 去重：只保留不重复的 definitionId
+        // 遍历所有 section 的 li 注入价格
+        const sections = document.querySelectorAll(".ut-sectioned-item-list-view");
+        let matched = 0, unmatched = 0;
+        sections.forEach(section => {
+          const playerItems = section.querySelectorAll("li.listFUTItem:not(.has-action)");
+          playerItems.forEach(li => {
+            const key = extractKeyFromLi(li);
+            const items = itemMap[key];
+            const item = items && items.length > 0 ? items.shift() : null;
+
+            if (!item) {
+              unmatched++;
+              return;
+            }
+            matched++;
+
+            const definitionId = Number(item.definitionId);
+
+            let priceLabel = li.querySelector(`.${PRICE_LABEL_CLASS}`);
+            if (!priceLabel) {
+              priceLabel = document.createElement("div");
+              priceLabel.className = PRICE_LABEL_CLASS;
+              li.appendChild(priceLabel);
+            }
+
+            const price = self.priceCacheMap[definitionId];
+            if (price && price > 0) {
+              priceLabel.textContent = price.toLocaleString();
+              priceLabel.classList.remove("no-price");
+            } else {
+              priceLabel.textContent = "N/A";
+              priceLabel.classList.add("no-price");
+            }
+          });
+        });
+
+        console.log(`[EAFC Grinder] 未分配列表价格渲染完成 - 匹配: ${matched}, 未匹配: ${unmatched}`);
+      }
+
+      // 定时检测：页面有未分配列表且未渲染价格时，触发查价和渲染
+      let isFetching = false;
+      setInterval(() => {
+        const sections = document.querySelectorAll(".ut-sectioned-item-list-view");
+        if (sections.length === 0) return;
+
+        // 检查是否还有没渲染价格的卡
+        let needsRender = false;
+        sections.forEach(section => {
+          const items = section.querySelectorAll("li.listFUTItem:not(.has-action)");
+          items.forEach(li => {
+            if (!li.querySelector(`.${PRICE_LABEL_CLASS}`)) {
+              needsRender = true;
+            }
+          });
+        });
+
+        if (!needsRender || isFetching) return;
+
+        const unassignedItems = getUnassignedPlayers();
+        if (unassignedItems.length === 0) return;
+
+        // 去重
         const seenDefIds = new Set();
         const uniqueItems = [];
         unassignedItems.forEach(item => {
@@ -1319,179 +1495,15 @@
         // 过滤出需要查价的球员
         const needPrice = uniqueItems.filter(item => {
           const defId = Number(item.definitionId);
-          return !self.priceCacheMap[defId] && !self._fetchingDefIds.has(defId);
+          return !(defId in self.priceCacheMap) && !self._fetchingDefIds.has(defId);
         });
 
-        if (needPrice.length === 0) {
-          console.log("[EAFC Grinder] 未分配球员价格已全部缓存");
+        if (needPrice.length > 0) {
+          fetchUnassignedPrices(unassignedItems, needPrice);
+        } else {
           injectPricesToDOM(unassignedItems);
-          isFetching = false;
-          hasInitialized = true;
-          return;
         }
-
-        console.log(`[EAFC Grinder] 未分配列表查价: ${unassignedItems.length} 张卡 (去重后 ${needPrice.length} 个唯一ID)`);
-
-        const platform = self._getPlatform();
-        const batchSize = 50;
-
-        for (let i = 0; i < needPrice.length; i += batchSize) {
-          const batch = needPrice.slice(i, i + batchSize);
-          const defIds = batch.map(p => Number(p.definitionId));
-
-          // 构建 players 对象
-          const players = {};
-          batch.forEach(p => {
-            players[p.definitionId] = {
-              nationId: p.nationId,
-              leagueId: p.leagueId,
-              teamId: p.teamId,
-              rating: p.rating
-            };
-          });
-
-          const reqStart = performance.now();
-          console.log(`[EAFC Grinder] 发送未分配查价请求: ${defIds.length} 个ID...`);
-
-          await new Promise((resolve) => {
-            GM_xmlhttpRequest({
-              method: "POST",
-              url: self._getPriceServerUrl(),
-              headers: { "Content-Type": "application/json" },
-              data: JSON.stringify({ definitionIds: defIds, platform: platform, players: players }),
-              onload(res) {
-                const reqTime = Math.round(performance.now() - reqStart);
-                console.log(`[EAFC Grinder] 未分配查价响应 (${reqTime}ms), status: ${res.status}`);
-                try {
-                  const data = JSON.parse(res.response);
-                  if (data.prices) {
-                    Object.entries(data.prices).forEach(([defId, result]) => {
-                      const price = result.price;
-                      self.priceCacheMap[Number(defId)] = (price && price > 0) ? price : 0;
-                    });
-                  }
-                } catch (e) {
-                  console.error("[EAFC Grinder] 未分配查价失败:", e);
-                }
-                resolve();
-              },
-              onerror() {
-                console.error("[EAFC Grinder] 未分配查价请求失败");
-                resolve();
-              }
-            });
-          });
-        }
-
-        console.log("[EAFC Grinder] 未分配查价完成，更新DOM...");
-        // 更新 DOM - 传入原始完整列表，按索引顺序渲染
-        injectPricesToDOM(unassignedItems);
-        isFetching = false;
-        hasInitialized = true;
-      }
-
-      // 在 DOM 中注入价格标签 - 按索引顺序匹配
-      function injectPricesToDOM(unassignedItems) {
-        const listContainer = document.querySelector(".ut-sectioned-item-list-view");
-        if (!listContainer) return;
-
-        const playerItems = listContainer.querySelectorAll("li.listFUTItem");
-        if (playerItems.length === 0) return;
-
-        playerItems.forEach((li, index) => {
-          // 按索引匹配：DOM 卡片顺序对应 unassignedItems 数组顺序
-          if (index >= unassignedItems.length) return;
-
-          const item = unassignedItems[index];
-          const definitionId = Number(item.definitionId);
-
-          // 检查是否已经有价格标签
-          let priceLabel = li.querySelector(`.${PRICE_LABEL_CLASS}`);
-          if (!priceLabel) {
-            priceLabel = document.createElement("div");
-            priceLabel.className = PRICE_LABEL_CLASS;
-            li.appendChild(priceLabel);
-          }
-
-          // 更新价格显示
-          const price = self.priceCacheMap[definitionId];
-          if (price && price > 0) {
-            priceLabel.textContent = price.toLocaleString();
-            priceLabel.classList.remove("no-price");
-          } else {
-            priceLabel.textContent = "N/A";
-            priceLabel.classList.add("no-price");
-          }
-        });
-      }
-
-      // 监听未分配列表容器变化
-      let hasInitialized = false;
-      let isFetching = false; // 防抖：防止重复查价
-      function setupObserver() {
-        if (self._unassignedObserver) {
-          self._unassignedObserver.disconnect();
-        }
-
-        self._unassignedObserver = new MutationObserver((mutations) => {
-          let shouldFetch = false;
-          mutations.forEach(m => {
-            if (m.addedNodes.length > 0) {
-              shouldFetch = true;
-            }
-          });
-
-          if (shouldFetch && !isFetching) {
-            // 先断开观察器，避免注入价格标签时再次触发
-            self._unassignedObserver.disconnect();
-            console.log("[EAFC Grinder] 检测到未分配列表变化，开始查价...");
-            fetchUnassignedPrices().finally(() => {
-              // 查价完成后重新观察
-              const listContainer = document.querySelector(".ut-sectioned-item-list-view");
-              if (listContainer) {
-                self._unassignedObserver.observe(listContainer, {
-                  childList: true,
-                  subtree: true
-                });
-              }
-            });
-          }
-        });
-
-        // 等待未分配列表容器出现
-        const waitForContainer = setInterval(() => {
-          const listContainer = document.querySelector(".ut-sectioned-item-list-view");
-          if (listContainer) {
-            clearInterval(waitForContainer);
-            self._unassignedObserver.observe(listContainer, {
-              childList: true,
-              subtree: true
-            });
-            console.log("[EAFC Grinder] 未分配价格监听已启动");
-            if (!isFetching) {
-              fetchUnassignedPrices();
-            }
-          }
-        }, 1000);
-      }
-
-      // 定期检查：确保即使页面初始就有卡也能触发查价
-      const periodicCheck = setInterval(() => {
-        const listContainer = document.querySelector(".ut-sectioned-item-list-view");
-        if (listContainer && !hasInitialized) {
-          const playerItems = listContainer.querySelectorAll("li.listFUTItem");
-          if (playerItems.length > 0) {
-            hasInitialized = true;
-            clearInterval(periodicCheck); // 一旦触发就停止定期检查
-            if (!isFetching) {
-              console.log("[EAFC Grinder] 定期检查：发现未分配球员，触发查价...");
-              fetchUnassignedPrices();
-            }
-          }
-        }
-      }, 2000);
-
-      setupObserver();
+      }, 500);
     },
 
     // 检测当前平台（pc 或 ps）
@@ -1511,98 +1523,16 @@
       return "https://reclining-skimmer-persevere.ngrok-free.dev/api/prices";
     },
 
-    // 批量获取所有卡价格（使用自建后端）
-    async _fetchAllSpecialPrices() {
-      const self = this;
-      const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
-      
-      // 筛选需要查价的卡：还没有价格且不在查询中的
-      const needPriceCards = allPlayers.filter(p => {
-        if (this.priceCacheMap[p.definitionId] !== undefined) return false;
-        if (this._fetchingDefIds.has(p.definitionId)) return false;
-        return true;
-      });
-      
-      if (needPriceCards.length === 0) {
-        console.log("[EAFC Grinder] 没有需要查价的卡");
-        return;
-      }
-
-      const platform = this._getPlatform();
-      const batchSize = 50;
-      const totalBatches = Math.ceil(needPriceCards.length / batchSize);
-      console.log(`[EAFC Grinder] 开始批量获取球员价格，共 ${needPriceCards.length} 张 / ${totalBatches} 批`);
-
-      for (let i = 0; i < needPriceCards.length; i += batchSize) {
-        const batch = needPriceCards.slice(i, i + batchSize);
-        const defIds = batch.map(p => p.definitionId);
-        const batchNum = Math.floor(i / batchSize) + 1;
-        console.log(`[EAFC Grinder] 正在获取第 ${batchNum}/${totalBatches} 批 (${defIds.length} 张)`);
-
-        // 构建 players 对象（首次查询需要球员属性）
-        const players = {};
-        batch.forEach(p => {
-          players[p.definitionId] = {
-            nationId: p.nationId,
-            leagueId: p.leagueId,
-            teamId: p.teamId,
-            rating: p.rating
-          };
-        });
-
-        // 记录请求开始时间
-        const reqStart = performance.now();
-
-        await new Promise((resolve) => {
-          GM_xmlhttpRequest({
-            method: "POST",
-            url: self._getPriceServerUrl(),
-            headers: { "Content-Type": "application/json" },
-            data: JSON.stringify({ definitionIds: defIds, platform: platform, players: players }),
-            onload(res) {
-              const reqEnd = performance.now();
-              const reqTime = Math.round(reqEnd - reqStart);
-              try {
-                const data = JSON.parse(res.response);
-                if (data.prices) {
-                  Object.entries(data.prices).forEach(([defId, result]) => {
-                    const price = result.price;
-                    if (price && price > 0) {
-                      self.priceCacheMap[defId] = price;
-                    } else {
-                      self.priceCacheMap[defId] = 0;
-                    }
-                  });
-                }
-              } catch (e) {
-                console.error(`[EAFC Grinder] 第 ${batchNum} 批查价失败:`, e);
-              }
-              // 只在本批查价的卡包含当前页数据时才刷新面板
-              const pagePlayers = self._getCurrentPagePlayers();
-              const hasPageData = pagePlayers.some(p => defIds.includes(p.definitionId));
-              if (hasPageData) {
-                self.autoRefreshPanel();
-                console.log(`[EAFC Grinder] 第 ${batchNum}/${totalBatches} 批完成，请求耗时 ${reqTime}ms，已更新面板`);
-              } else {
-                console.log(`[EAFC Grinder] 第 ${batchNum}/${totalBatches} 批完成，请求耗时 ${reqTime}ms（不影响当前页）`);
-              }
-              resolve();
-            },
-            onerror() {
-              console.error(`[EAFC Grinder] 第 ${batchNum} 批请求失败`);
-              resolve();
-            }
-          });
-        });
-      }
-      console.log("[EAFC Grinder] 所有球员价格获取完成");
+    // 全量价格接口地址
+    _getAllPricesUrl() {
+      return "https://reclining-skimmer-persevere.ngrok-free.dev/api/all-prices";
     },
 
-    // 按需查价：对当前页没价格的卡触发查询
+    // SBC 一键填充功能
     fetchPricesOnDemand(pagePlayers) {
       const self = this;
       const missing = pagePlayers.filter(p => {
-        if (this.priceCacheMap[p.definitionId] !== undefined) return false;
+        if (p.definitionId in this.priceCacheMap) return false;
         if (this._onDemandFetching && this._onDemandFetching.has(p.definitionId)) return false;
         return true;
       });
@@ -1614,7 +1544,7 @@
       const defIds = missing.map(p => p.definitionId);
       const platform = this._getPlatform();
 
-      // 构建 players 对象
+      // 构建 players 对象（futbin 兜底需要球员属性）
       const players = {};
       missing.forEach(p => {
         players[p.definitionId] = {
@@ -1636,11 +1566,7 @@
             if (data.prices) {
               Object.entries(data.prices).forEach(([defId, result]) => {
                 const price = result.price;
-                if (price && price > 0) {
-                  self.priceCacheMap[defId] = price;
-                } else {
-                  self.priceCacheMap[defId] = 0;
-                }
+                self.priceCacheMap[defId] = (price && price > 0) ? price : 0;
                 self._onDemandFetching.delete(defId);
               });
             }
@@ -1662,84 +1588,6 @@
           self.renderPanel();
         }
       });
-    },
-
-    _fetchSpecialPricesForPlayers(players) {
-      const self = this;
-      players = players.filter(p => this.priceCacheMap[p.definitionId] === undefined && !self._fetchingDefIds.has(p.definitionId));
-      if (players.length === 0) return;
-
-      players.forEach(p => self._fetchingDefIds.add(p.definitionId));
-      const defIds = players.map(p => p.definitionId);
-      const platform = this._getPlatform();
-
-      // 构建 players 对象
-      const playersData = {};
-      players.forEach(p => {
-        playersData[p.definitionId] = {
-          nationId: p.nationId,
-          leagueId: p.leagueId,
-          teamId: p.teamId,
-          rating: p.rating
-        };
-      });
-
-      console.log(`[EAFC Grinder] 特殊卡查价: 共${players.length}张`);
-
-      GM_xmlhttpRequest({
-        method: "POST",
-        url: self._getPriceServerUrl(),
-        headers: { "Content-Type": "application/json" },
-        data: JSON.stringify({ definitionIds: defIds, platform: platform, players: playersData }),
-        onload(res) {
-          try {
-            const data = JSON.parse(res.response);
-            if (data.prices) {
-              Object.entries(data.prices).forEach(([defId, result]) => {
-                const price = result.price;
-                if (price && price > 0) {
-                  self.priceCacheMap[defId] = price;
-                } else {
-                  self.priceCacheMap[defId] = 0;
-                }
-                self._fetchingDefIds.delete(defId);
-              });
-            }
-            console.log("[EAFC Grinder] 特殊卡价格更新完成，本次获取", players.length, "条");
-          } catch (e) {
-            console.error("[EAFC Grinder] 特殊卡价格更新出错:", e);
-            players.forEach(p => {
-              self._fetchingDefIds.delete(p.definitionId);
-              self.priceCacheMap[p.definitionId] = 0;
-            });
-          }
-          self.renderPanel();
-        },
-        onerror() {
-          console.error("[EAFC Grinder] 特殊卡价格请求失败");
-          players.forEach(p => {
-            self._fetchingDefIds.delete(p.definitionId);
-            self.priceCacheMap[p.definitionId] = 0;
-          });
-          self.renderPanel();
-        }
-      });
-    },
-
-    // 检查并补充查询还没有价格的卡
-    fetchMissingSpecialPrices() {
-      const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
-      const missing = [];
-      const seenDefIds = new Set();
-      allPlayers.forEach(p => {
-        if (p.definitionId && this.priceCacheMap[p.definitionId] === undefined && !this._fetchingDefIds.has(p.definitionId) && !seenDefIds.has(p.definitionId)) {
-          seenDefIds.add(p.definitionId);
-          missing.push(p);
-        }
-      });
-      if (missing.length === 0) return;
-      console.log("[EAFC Grinder] 发现", missing.length, "张新卡，开始查价格");
-      this._fetchSpecialPricesForPlayers(missing);
     },
 
     // SBC 一键填充功能

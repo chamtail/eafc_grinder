@@ -542,6 +542,7 @@
         this.showPlayerPanel();
         this.initSBCFillButton();
         this.initPriceCache();
+        this.initClubPriceDisplay();
 
       } catch (error) {
         const overlay = document.querySelector(".grinder-loading-overlay");
@@ -1406,17 +1407,13 @@
           const nationId = nationSrc.match(/(\d+)\.png/)?.[1] || '';
           const leagueId = leagueSrc.match(/(\d+)\.png/)?.[1] || '';
           const teamId = clubSrc.match(/(\d+)\.png/)?.[1] || '';
-          // 6项小数据: PAC,SHO,PAS,DRI,DEF,PHY
-          const statLabels = ['PAC','SHO','PAS','DRI','DEF','PHY'];
-          const statValues = statLabels.map(label => {
-            const spans = li.querySelectorAll('.player-stats-data-component li');
-            for (const s of spans) {
-              const l = s.querySelector('.label');
-              const v = s.querySelector('.value');
-              if (l && v && l.textContent.trim() === label) return v.textContent.trim();
-            }
-            return '';
+          // 6项小数据，按顺序取值（守门员标签不同，不能按名称匹配）
+          const statSpans = li.querySelectorAll('.player-stats-data-component li');
+          const statValues = Array.from(statSpans).slice(0, 6).map(s => {
+            const v = s.querySelector('.value');
+            return v ? v.textContent.trim() : '';
           });
+          while (statValues.length < 6) statValues.push('');
           return `${rating}|${name}|${nationId}|${leagueId}|${teamId}|${statValues.join('|')}`;
         }
 
@@ -1502,6 +1499,140 @@
           fetchUnassignedPrices(unassignedItems, needPrice);
         } else {
           injectPricesToDOM(unassignedItems);
+        }
+      }, 500);
+    },
+
+    // 俱乐部页面价格显示 - 在 EA 原生俱乐部列表中注入价格标签
+    initClubPriceDisplay() {
+      const self = this;
+      const PRICE_LABEL_CLASS = "grinder-club-price";
+
+      // 添加价格标签样式
+      const style = document.createElement("style");
+      style.textContent = `
+        .${PRICE_LABEL_CLASS} {
+          position: absolute;
+          top: 50%;
+          left: 90%;
+          transform: translate(-50%, -50%);
+          background: rgba(0, 0, 0, 0.9);
+          color: #f6b803;
+          padding: 8px 16px;
+          border-radius: 6px;
+          font-size: 18px;
+          font-weight: bold;
+          z-index: 10;
+          pointer-events: none;
+          white-space: nowrap;
+          text-align: center;
+          border: 2px solid #f6b803;
+        }
+        .${PRICE_LABEL_CLASS}.no-price {
+          color: #a4a9b4;
+          border-color: #a4a9b4;
+        }
+      `;
+      document.head.appendChild(style);
+
+      // 从 DOM 元素提取匹配 key
+      function extractKeyFromLi(li) {
+        const rating = li.querySelector('.rating')?.textContent?.trim() || '';
+        const name = li.querySelector('.name')?.textContent?.trim() || '';
+        const nationSrc = li.querySelector('img[src*="flags"]')?.getAttribute('src') || '';
+        const leagueSrc = li.querySelector('img[src*="leagues"]')?.getAttribute('src') || '';
+        const clubSrc = li.querySelector('img[src*="clubs"]')?.getAttribute('src') || '';
+        const nationId = nationSrc.match(/(\d+)\.png/)?.[1] || '';
+        const leagueId = leagueSrc.match(/(\d+)\.png/)?.[1] || '';
+        const teamId = clubSrc.match(/(\d+)\.png/)?.[1] || '';
+        const statSpans = li.querySelectorAll('.player-stats-data-component li');
+        const statValues = Array.from(statSpans).slice(0, 6).map(s => {
+          const v = s.querySelector('.value');
+          return v ? v.textContent.trim() : '';
+        });
+        while (statValues.length < 6) statValues.push('');
+        return `${rating}|${name}|${nationId}|${leagueId}|${teamId}|${statValues.join('|')}`;
+      }
+
+      // 定时检测
+      setInterval(() => {
+        const listContainer = document.querySelector(".ut-pinned-list-container ul.paginated");
+        if (!listContainer) return;
+
+        const playerItems = listContainer.querySelectorAll("li.listFUTItem:not(.has-action)");
+        if (playerItems.length === 0) return;
+
+        // 检查是否还有没渲染价格的卡
+        let needsRender = false;
+        playerItems.forEach(li => {
+          if (!li.querySelector(`.${PRICE_LABEL_CLASS}`)) needsRender = true;
+        });
+        if (!needsRender) return;
+
+        // 构建玩家数据查找表
+        const allPlayers = [...this.getClubPlayers(), ...this.getStoragePlayers()];
+        const itemMap = {};
+        allPlayers.forEach(p => {
+          const origItem = p._item;
+          const staticData = origItem?._staticData || origItem?.getStaticData?.() || null;
+          const knownAs = staticData?.knownAs || '';
+          const lastName = staticData?.lastName || p.lastName || '';
+          const name = (knownAs && knownAs !== '---') ? knownAs : lastName;
+          const attrs = origItem?.attributes || [];
+          const key = `${p.rating}|${name}|${p.nationId}|${p.leagueId}|${p.teamId}|${attrs[0]||''}|${attrs[1]||''}|${attrs[2]||''}|${attrs[3]||''}|${attrs[4]||''}|${attrs[5]||''}`;
+          if (!itemMap[key]) itemMap[key] = [];
+          itemMap[key].push(p);
+        });
+
+        // 注入价格
+        let matched = 0;
+        let unmatched = 0;
+        playerItems.forEach(li => {
+          const key = extractKeyFromLi(li);
+          const items = itemMap[key];
+          const item = items && items.length > 0 ? items.shift() : null;
+          if (!item) {
+            unmatched++;
+            if (unmatched <= 5) {
+              const name = li.querySelector('.name')?.textContent?.trim() || '?';
+              console.warn(`[EAFC Grinder] 俱乐部未匹配: name="${name}", key="${key}"`);
+              // 打印最接近的 key
+              const keys = Object.keys(itemMap);
+              if (keys.length > 0) {
+                const rating = key.split('|')[0];
+                const closeKeys = keys.filter(k => k.startsWith(rating + '|')).slice(0, 3);
+                if (closeKeys.length > 0) {
+                  console.warn(`  可能的匹配: ${closeKeys.join(' | ')}`);
+                }
+              }
+            }
+            return;
+          }
+
+          matched++;
+          const definitionId = Number(item.definitionId);
+
+          let priceLabel = li.querySelector(`.${PRICE_LABEL_CLASS}`);
+          if (!priceLabel) {
+            priceLabel = document.createElement("div");
+            priceLabel.className = PRICE_LABEL_CLASS;
+            li.appendChild(priceLabel);
+          }
+
+          const price = self.priceCacheMap[definitionId];
+          if (price && price > 0) {
+            priceLabel.textContent = price.toLocaleString();
+            priceLabel.classList.remove("no-price");
+          } else {
+            priceLabel.textContent = "N/A";
+            priceLabel.classList.add("no-price");
+          }
+        });
+
+        if (matched > 0) {
+          const totalMatched = matched;
+          const totalUnmatched = unmatched;
+          console.log(`[EAFC Grinder] 俱乐部列表价格渲染完成 - 匹配: ${totalMatched}, 未匹配: ${totalUnmatched}`);
         }
       }, 500);
     },

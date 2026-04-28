@@ -1257,6 +1257,23 @@
                 self.priceCacheMap[Number(id)] = (price && price > 0) ? price : 0;
               });
               console.log(`[EAFC Grinder] 全量价格加载完成: ${count} 张卡, ${reqTime}ms`);
+
+              // 打印所有球员的 SBC 信息（含价格和 metaDataId）
+              const allSbcPlayers = [...self.getClubPlayers(), ...self.getStoragePlayers()];
+              const sbcData = allSbcPlayers.map(p => ({
+                name: p.name,
+                basePossiblePositions: p.positions,
+                teamId: p.teamId,
+                nationId: p.nationId,
+                leagueId: p.leagueId,
+                _rareflag: p.rareflag,
+                _rating: p.rating,
+                groups: p.groups,
+                metaDataId: p.metaDataId,
+                price: self.priceCacheMap[p.definitionId] || 0
+              }));
+              console.log("[EAFC Grinder] SBC球员数据:", JSON.stringify(sbcData));
+
               self.renderPanel();
             }
           } catch (e) {
@@ -1918,7 +1935,68 @@
 
         console.log("[EAFC Grinder] SBC 需求:", squadRequirements);
 
-        // === TEAM_RATING 处理 ===
+        // === 当存在化学要求时，跳过 calculateFillRatings，直接走化学感知求解器 ===
+        if (squadRequirements.minChemistry > 0) {
+          console.log("[EAFC Grinder] >>> 走化学感知求解器分支 (跳过 calculateFillRatings)");
+
+          // 显示加载遮盖（与球员数据加载风格一致）
+          const overlay = document.createElement('div');
+          overlay.className = 'grinder-loading-overlay';
+          overlay.innerHTML = `
+            <div class="loading-text">正在努力填充中...</div>
+            <div class="loading-bar-bg"><div class="loading-bar-fill" style="width:0%"></div></div>
+            <div class="loading-detail">化学感知求解器运行中</div>
+          `;
+          document.body.appendChild(overlay);
+          const barFill = overlay.querySelector('.loading-bar-fill');
+          const detailEl = overlay.querySelector('.loading-detail');
+
+          // 进度回调
+          this._chemProgress = (pct, detail) => {
+            try {
+              barFill.style.width = pct + '%';
+              if (detail) detailEl.textContent = detail;
+            } catch(e) {}
+          };
+
+          const removeOverlay = () => {
+            delete this._chemProgress;
+            const el = document.querySelector('.grinder-loading-overlay');
+            if (el) el.remove();
+          };
+
+          try {
+            const eligiblePlayers = this.filterEligiblePlayers(squadRequirements);
+
+            const optimalSquad = await this.selectOptimalSquadWithChemistry(eligiblePlayers, squadRequirements, null, controller);
+
+            const ratingRangesTotal = squadRequirements.ratingRanges.reduce((sum, r) => sum + r.count, 0);
+            const requiredCount = ratingRangesTotal > 0 ? ratingRangesTotal : squadRequirements.minPlayers;
+
+            if (optimalSquad.length < requiredCount) {
+              removeOverlay();
+              alert("❌ 俱乐部中没有足够的球员满足 SBC 需求\n\n需要: " + requiredCount + " 名\n可用: " + optimalSquad.length + " 名");
+              fillBtn.disabled = false;
+              fillBtn.textContent = "⚡ 一键填充最优阵容";
+              fillBtn.style.opacity = "1";
+              return;
+            }
+
+            // 填充到阵容
+            const fillLog = await this.fillSquadWithPlayers(controller, optimalSquad);
+
+            removeOverlay();
+            fillBtn.disabled = false;
+            fillBtn.textContent = "⚡ 一键填充最优阵容";
+            fillBtn.style.opacity = "1";
+            return;
+          } catch (err) {
+            removeOverlay();
+            throw err;
+          }
+        }
+
+        // === TEAM_RATING 处理（无化学要求时） ===
         let fillRatings = null;
         if (squadRequirements.minTeamRating > 0) {
           try {
@@ -1943,6 +2021,7 @@
         const eligiblePlayers = this.filterEligiblePlayers(squadRequirements);
 
         // 选择最优阵容（评分最低但符合条件，若存在 TEAM_RATING 则按 fillRatings 指导）
+        console.log("[EAFC Grinder] >>> 走原有快速填充分支");
         const optimalSquad = this.selectOptimalSquad(eligiblePlayers, squadRequirements, fillRatings);
 
         // 计算需要的球员数
@@ -1995,19 +2074,33 @@
         minRating: 0,
         maxRating: 999,
         minChemistry: 0,          // key 35: CHEMISTRY_POINTS
-        minRare: 0,
-        minRareCount: 0,          // key 25: PLAYER_RARITY_GROUP - 至少 count 名 rarityGroup === value 的球员
+        // 稀有度组：scope=0 至少, scope=1 至多, scope=2 恰好
+        minRareCount: 0,
         minRarityGroup: null,     // key 25: rarityGroup 精确值
+        maxRareCount: 0,          // key 25 scope=1: 至多N名
+        // 阵容评分
         minTeamRating: 0,         // key 19: TEAM_RATING - 阵容平均评分下限
-        globalQuality: 0,         // key 3:  PLAYER_QUALITY - 全队卡片等级 (1=铜, 2=银, 3=金)
-        sameNationCount: 0,       // key 4:  SAME_NATION_COUNT
-        sameLeagueCount: 0,       // key 5:  SAME_LEAGUE_COUNT
-        sameClubCount: 0,         // key 6:  SAME_CLUB_COUNT
-        nationCount: 0,           // key 7:  NATION_COUNT
-        leagueCount: 0,           // key 8:  LEAGUE_COUNT
-        clubCount: 0,             // key 9:  CLUB_COUNT
-        legendCount: 0,           // key 15: LEGEND_COUNT
-        firstOwnerCount: 0,       // key 30: FIRST_OWNER_PLAYERS_COUNT
+        // 全局卡片等级：scope=0 至少, scope=1 至多, scope=2 恰好
+        globalQualityMin: 0,      // key 3 scope=0: 至少该等级 (1=铜, 2=银, 3=金)
+        globalQualityMax: 0,      // key 3 scope=1: 至多该等级
+        // 同X数量：scope=0 至少, scope=1 至多, scope=2 恰好
+        sameNationMin: 0,         // key 4 scope=0
+        sameNationMax: 0,         // key 4 scope=1/2
+        sameLeagueMin: 0,         // key 5 scope=0
+        sameLeagueMax: 0,         // key 5 scope=1/2
+        sameClubMin: 0,           // key 6 scope=0
+        sameClubMax: 0,           // key 6 scope=1/2
+        // 不同X数量：scope=0 至少, scope=1 至多, scope=2 恰好
+        nationCountMin: 0,        // key 7 scope=0
+        nationCountMax: 0,        // key 7 scope=1/2
+        leagueCountMin: 0,        // key 8 scope=0
+        leagueCountMax: 0,        // key 8 scope=1/2
+        clubCountMin: 0,          // key 9 scope=0
+        clubCountMax: 0,          // key 9 scope=1/2
+        legendCountMin: 0,        // key 15 scope=0
+        legendCountMax: 0,        // key 15 scope=1/2
+        firstOwnerMin: 0,         // key 30 scope=0
+        firstOwnerMax: 0,         // key 30 scope=1/2
         tradability: null,        // key 33: PLAYER_TRADABILITY
         requiredPositions: [],
         requiredLeague: null,
@@ -2018,9 +2111,23 @@
 
       if (!requirements || requirements.length === 0) return reqs;
 
+      // 辅助：根据 scope 设置 min/max 值
+      // scope=0: 至少 → 设 min; scope=1: 至多 → 设 max; scope=2: 恰好 → 设 min 和 max
+      const setByScope = (minField, maxField, value, scope) => {
+        if (scope === 0) {
+          reqs[minField] = value;
+        } else if (scope === 1) {
+          reqs[maxField] = value;
+        } else if (scope === 2) {
+          reqs[minField] = value;
+          reqs[maxField] = value;
+        }
+      };
+
       requirements.forEach((req) => {
         try {
           const count = req.count;
+          const scope = req.scope != null ? req.scope : 0; // 默认 scope=0（至少）
           const collection = req.kvPairs && req.kvPairs._collection ? req.kvPairs._collection : {};
           const keys = Object.keys(collection);
 
@@ -2038,52 +2145,56 @@
               case 2:  // PLAYER_COUNT - 阵容球员总数（全局）
                 isGlobal = true;
                 break;
-              case 3:  // PLAYER_QUALITY 全局卡片等级 (1=铜, 2=银, 3=金)
-                reqs.globalQuality = firstValue;
+              case 3:  // PLAYER_QUALITY 卡片等级 (1=铜, 2=银, 3=金)
+                setByScope('globalQualityMin', 'globalQualityMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 4:  // SAME_NATION_COUNT
-                reqs.sameNationCount = firstValue;
+                setByScope('sameNationMin', 'sameNationMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 5:  // SAME_LEAGUE_COUNT
-                reqs.sameLeagueCount = firstValue;
+                setByScope('sameLeagueMin', 'sameLeagueMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 6:  // SAME_CLUB_COUNT
-                reqs.sameClubCount = firstValue;
+                setByScope('sameClubMin', 'sameClubMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 7:  // NATION_COUNT
-                reqs.nationCount = firstValue;
+                setByScope('nationCountMin', 'nationCountMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 8:  // LEAGUE_COUNT
-                reqs.leagueCount = firstValue;
+                setByScope('leagueCountMin', 'leagueCountMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 9:  // CLUB_COUNT
-                reqs.clubCount = firstValue;
+                setByScope('clubCountMin', 'clubCountMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 10: // NATION_ID
                 slot.nations = Array.isArray(value) ? value : [value];
+                slot.scope = scope;
                 break;
               case 11: // LEAGUE_ID
                 slot.leagues = Array.isArray(value) ? value : [value];
+                slot.scope = scope;
                 break;
               case 12: // CLUB_ID
                 slot.clubs = Array.isArray(value) ? value : [value];
+                slot.scope = scope;
                 break;
               case 13: // SCOPE（全局标记）
                 isGlobal = true;
                 break;
               case 15: // LEGEND_COUNT
-                reqs.legendCount = firstValue;
+                setByScope('legendCountMin', 'legendCountMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 17: // PLAYER_LEVEL / PLAYER_QUALITY (1=铜, 2=银, 3=金)
                 slot.quality = firstValue;
+                slot.scope = scope;
                 break;
               case 18: // PLAYER_RARITY - 精确匹配单一稀有度
                 slot.exactRare = firstValue;
@@ -2092,10 +2203,17 @@
                 reqs.minTeamRating = firstValue || 0;
                 isGlobal = true;
                 break;
-              case 25: // PLAYER_RARITY_GROUP: count 名 rarityGroup === firstValue 的球员
-                reqs.minRareCount = count > 0 ? count : 1;
+              case 25: // PLAYER_RARITY_GROUP: rarityGroup === firstValue 的球员
                 reqs.minRarityGroup = firstValue;
-                console.log("[EAFC Grinder DEBUG] PLAYER_RARITY_GROUP value:", firstValue, "count:", count, "raw value:", value);
+                if (scope === 0) {
+                  reqs.minRareCount = count > 0 ? count : 1;
+                } else if (scope === 1) {
+                  reqs.maxRareCount = count > 0 ? count : 1;
+                } else if (scope === 2) {
+                  reqs.minRareCount = count > 0 ? count : 1;
+                  reqs.maxRareCount = count > 0 ? count : 1;
+                }
+                console.log("[EAFC Grinder DEBUG] PLAYER_RARITY_GROUP value:", firstValue, "count:", count, "scope:", scope, "raw value:", value);
                 isGlobal = true;
                 break;
               case 26: // PLAYER_MIN_OVR
@@ -2109,7 +2227,7 @@
                 slot.max = firstValue;
                 break;
               case 30: // FIRST_OWNER_PLAYERS_COUNT
-                reqs.firstOwnerCount = firstValue;
+                setByScope('firstOwnerMin', 'firstOwnerMax', firstValue, scope);
                 isGlobal = true;
                 break;
               case 33: // PLAYER_TRADABILITY
@@ -2134,6 +2252,7 @@
         }
       });
 
+      console.log("[EAFC Grinder] 解析后的SBC需求:", JSON.stringify(reqs));
       return reqs;
     },
 
@@ -2166,28 +2285,49 @@
       // 过滤进化卡
       eligible = eligible.filter(p => !this.isUpgradedCard(p));
 
-      // 应用全局卡片等级约束
-      if (requirements.globalQuality) {
-        if (requirements.globalQuality === 1) {
-          eligible = eligible.filter(p => p.rating <= 64);
-        } else if (requirements.globalQuality === 2) {
-          eligible = eligible.filter(p => p.rating >= 65 && p.rating <= 74);
-        } else if (requirements.globalQuality === 3) {
-          eligible = eligible.filter(p => p.rating >= 75);
-        }
+      // 应用全局卡片等级约束（scope=0 至少, scope=1 至多）
+      const qualityRatingMap = { 1: [0, 64], 2: [65, 74], 3: [75, 99] };
+      if (requirements.globalQualityMin || requirements.globalQualityMax) {
+        eligible = eligible.filter(p => {
+          if (requirements.globalQualityMin) {
+            // 至少该等级 → 评分 >= 该等级最低评分
+            const [minR] = qualityRatingMap[requirements.globalQualityMin] || [0, 99];
+            if (p.rating < minR) return false;
+          }
+          if (requirements.globalQualityMax) {
+            // 至多该等级 → 评分 <= 该等级最高评分
+            const [, maxR] = qualityRatingMap[requirements.globalQualityMax] || [0, 99];
+            if (p.rating > maxR) return false;
+          }
+          return true;
+        });
       }
 
-      // 将 count === minPlayers 的 ratingRanges 条件提升为硬过滤
+      // 将 scope=0/2 且 count === minPlayers 的 ratingRanges 条件提升为硬过滤
+      // scope=0 (至少): 所有球员都必须满足（如"至少11名来自某联赛"=全部来自该联赛）
+      // scope=1 (至多): 不能作为硬过滤（如"至多3名同俱乐部"不是所有球员的约束）
+      // scope=2 (恰好): 同 scope=0，所有球员都必须满足
       if (requirements.ratingRanges && requirements.minPlayers > 0) {
         for (const range of requirements.ratingRanges) {
           if (range.count !== requirements.minPlayers) continue;
+          if (range.scope === 1) continue; // scope=1 (至多) 不提升为硬过滤
           // 该条件每个空位都必须满足，提升为硬约束
           eligible = eligible.filter(p => {
             let minR = range.min || 0;
             let maxR = range.max || 999;
-            if (range.quality === 1) { minR = 0; maxR = 64; }
-            else if (range.quality === 2) { minR = 65; maxR = 74; }
-            else if (range.quality === 3) { minR = 75; maxR = 99; }
+            if (range.quality) {
+              if (range.scope === 0) {
+                // 至少该品质 → 评分 >= 该品质最低分
+                if (range.quality === 1) minR = 0;
+                else if (range.quality === 2) minR = 65;
+                else if (range.quality === 3) minR = 75;
+              } else {
+                // scope=2 恰好，或默认行为
+                if (range.quality === 1) { minR = 0; maxR = 64; }
+                else if (range.quality === 2) { minR = 65; maxR = 74; }
+                else if (range.quality === 3) { minR = 75; maxR = 99; }
+              }
+            }
             if (p.rating < minR || p.rating > maxR) return false;
             if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
             if (range.leagues && !range.leagues.includes(p.leagueId)) return false;
@@ -2225,9 +2365,12 @@
 
       const totalNeeded = requirements.minPlayers || 11;
 
-      // 排序优先级：不可交易 > 可交易，common(0) > rare(1) > 特殊卡，仓库球员优先，评分低的优先
+      // 排序优先级：不可交易 > 价格低 > common(0) > rare(1) > 特殊卡 > 仓库球员优先 > 评分低的优先
       const sortedPlayers = [...eligiblePlayers].sort((a, b) => {
         if (a.tradable !== b.tradable) return a.tradable ? 1 : -1;
+        const valA = this.getPlayerPrice(a);
+        const valB = this.getPlayerPrice(b);
+        if (valA !== valB) return valA - valB;
         if (a.rareflag !== b.rareflag) return a.rareflag - b.rareflag;
         if (a.isStorage !== b.isStorage) return a.isStorage ? -1 : 1;
         return a.rating - b.rating;
@@ -2298,13 +2441,21 @@
       const ratingRangesTotal = requirements.ratingRanges.reduce((sum, r) => sum + r.count, 0);
       if (requirements.ratingRanges.length > 0 && slotIdsFilled < ratingRangesTotal) {
         for (const range of requirements.ratingRanges) {
+          // scope=1 (至多) 的槽位需求不在此处处理，在最终验证阶段检查
+          if (range.scope === 1) continue;
+
           let minRating = range.min || 0;
           let maxRating = range.max || 999;
 
           if (range.quality) {
-            if (range.quality === 1) { minRating = 0; maxRating = 64; }
-            else if (range.quality === 2) { minRating = 65; maxRating = 74; }
-            else if (range.quality === 3) { minRating = 75; maxRating = 99; }
+            const qrm = { 1: [0, 64], 2: [65, 74], 3: [75, 99] };
+            if (range.scope === 0) {
+              // 至少该品质 → 评分 >= 该品质最低分
+              [minRating] = qrm[range.quality] || [0, 99];
+            } else {
+              // scope=2 恰好
+              [minRating, maxRating] = qrm[range.quality] || [0, 99];
+            }
           }
 
           let picked = 0;
@@ -2370,6 +2521,102 @@
         });
       }
 
+      // 验证全局数量约束（至少/至多/恰好）
+      const validateGlobalCounts = (squadPlayers) => {
+        const errors = [];
+
+        // 同国家数量
+        const nationGroups = {};
+        squadPlayers.forEach(p => { nationGroups[p.nationId] = (nationGroups[p.nationId] || 0) + 1; });
+        const maxSameNation = Math.max(...Object.values(nationGroups), 0);
+        if (requirements.sameNationMin > 0 && maxSameNation < requirements.sameNationMin) {
+          errors.push(`同国家球员至少${requirements.sameNationMin}名，当前最多${maxSameNation}名`);
+        }
+        if (requirements.sameNationMax > 0 && maxSameNation > requirements.sameNationMax) {
+          errors.push(`同国家球员至多${requirements.sameNationMax}名，当前最多${maxSameNation}名`);
+        }
+
+        // 同联赛数量
+        const leagueGroups = {};
+        squadPlayers.forEach(p => { leagueGroups[p.leagueId] = (leagueGroups[p.leagueId] || 0) + 1; });
+        const maxSameLeague = Math.max(...Object.values(leagueGroups), 0);
+        if (requirements.sameLeagueMin > 0 && maxSameLeague < requirements.sameLeagueMin) {
+          errors.push(`同联赛球员至少${requirements.sameLeagueMin}名，当前最多${maxSameLeague}名`);
+        }
+        if (requirements.sameLeagueMax > 0 && maxSameLeague > requirements.sameLeagueMax) {
+          errors.push(`同联赛球员至多${requirements.sameLeagueMax}名，当前最多${maxSameLeague}名`);
+        }
+
+        // 同俱乐部数量
+        const clubGroups = {};
+        squadPlayers.forEach(p => { clubGroups[p.teamId] = (clubGroups[p.teamId] || 0) + 1; });
+        const maxSameClub = Math.max(...Object.values(clubGroups), 0);
+        if (requirements.sameClubMin > 0 && maxSameClub < requirements.sameClubMin) {
+          errors.push(`同俱乐部球员至少${requirements.sameClubMin}名，当前最多${maxSameClub}名`);
+        }
+        if (requirements.sameClubMax > 0 && maxSameClub > requirements.sameClubMax) {
+          errors.push(`同俱乐部球员至多${requirements.sameClubMax}名，当前最多${maxSameClub}名`);
+        }
+
+        // 不同国家数量
+        const uniqueNations = new Set(squadPlayers.map(p => p.nationId)).size;
+        if (requirements.nationCountMin > 0 && uniqueNations < requirements.nationCountMin) {
+          errors.push(`至少${requirements.nationCountMin}个不同国家，当前${uniqueNations}个`);
+        }
+        if (requirements.nationCountMax > 0 && uniqueNations > requirements.nationCountMax) {
+          errors.push(`至多${requirements.nationCountMax}个不同国家，当前${uniqueNations}个`);
+        }
+
+        // 不同联赛数量
+        const uniqueLeagues = new Set(squadPlayers.map(p => p.leagueId)).size;
+        if (requirements.leagueCountMin > 0 && uniqueLeagues < requirements.leagueCountMin) {
+          errors.push(`至少${requirements.leagueCountMin}个不同联赛，当前${uniqueLeagues}个`);
+        }
+        if (requirements.leagueCountMax > 0 && uniqueLeagues > requirements.leagueCountMax) {
+          errors.push(`至多${requirements.leagueCountMax}个不同联赛，当前${uniqueLeagues}个`);
+        }
+
+        // 不同俱乐部数量
+        const uniqueClubs = new Set(squadPlayers.map(p => p.teamId)).size;
+        if (requirements.clubCountMin > 0 && uniqueClubs < requirements.clubCountMin) {
+          errors.push(`至少${requirements.clubCountMin}个不同俱乐部，当前${uniqueClubs}个`);
+        }
+        if (requirements.clubCountMax > 0 && uniqueClubs > requirements.clubCountMax) {
+          errors.push(`至多${requirements.clubCountMax}个不同俱乐部，当前${uniqueClubs}个`);
+        }
+
+        // 传奇数量
+        const legendCount = squadPlayers.filter(p => p.leagueId === 2124 || p.nationId === 0).length;
+        if (requirements.legendCountMin > 0 && legendCount < requirements.legendCountMin) {
+          errors.push(`至少${requirements.legendCountMin}名传奇球员，当前${legendCount}名`);
+        }
+        if (requirements.legendCountMax > 0 && legendCount > requirements.legendCountMax) {
+          errors.push(`至多${requirements.legendCountMax}名传奇球员，当前${legendCount}名`);
+        }
+
+        // 稀有度组数量
+        if (requirements.minRarityGroup !== null) {
+          const groupCount = squadPlayers.filter(p => Array.isArray(p.groups) && p.groups.includes(requirements.minRarityGroup)).length;
+          if (requirements.minRareCount > 0 && groupCount < requirements.minRareCount) {
+            errors.push(`稀有度组球员至少${requirements.minRareCount}名，当前${groupCount}名`);
+          }
+          if (requirements.maxRareCount > 0 && groupCount > requirements.maxRareCount) {
+            errors.push(`稀有度组球员至多${requirements.maxRareCount}名，当前${groupCount}名`);
+          }
+        }
+
+        // 首发球员数量
+        const firstOwnerCount = squadPlayers.filter(p => p._item && p._item.isFirstOwner).length;
+        if (requirements.firstOwnerMin > 0 && firstOwnerCount < requirements.firstOwnerMin) {
+          errors.push(`首发球员至少${requirements.firstOwnerMin}名，当前${firstOwnerCount}名`);
+        }
+        if (requirements.firstOwnerMax > 0 && firstOwnerCount > requirements.firstOwnerMax) {
+          errors.push(`首发球员至多${requirements.firstOwnerMax}名，当前${firstOwnerCount}名`);
+        }
+
+        return errors;
+      };
+
       while (squad.length < totalNeeded) {
         let found = false;
 
@@ -2412,6 +2659,13 @@
         }
       }
 
+      // 最终验证全局数量约束
+      const validationErrors = validateGlobalCounts(squad);
+      if (validationErrors.length > 0) {
+        console.warn("[EAFC Grinder] 阵容约束验证问题:", validationErrors);
+        // 不阻止填充，但在控制台警告
+      }
+
       return squad;
     },
 
@@ -2430,6 +2684,791 @@
         }
       });
       return Math.floor(Math.round(sum) / 11);
+    },
+
+    // ========== 化学计算工具方法 ==========
+
+    // 计算正确位置球员的总化学值
+    _calcChemistryForCorrectPlayers(correctPlayers) {
+      const leagueCount = {}, nationCount = {}, clubCount = {};
+      for (const p of correctPlayers) {
+        leagueCount[p.leagueId] = (leagueCount[p.leagueId] || 0) + 1;
+        nationCount[p.nationId] = (nationCount[p.nationId] || 0) + 1;
+        clubCount[p.teamId] = (clubCount[p.teamId] || 0) + 1;
+      }
+      const lb = n => n >= 8 ? 3 : n >= 5 ? 2 : n >= 3 ? 1 : 0;
+      const nb = n => n >= 8 ? 3 : n >= 5 ? 2 : n >= 2 ? 1 : 0;
+      const cb = n => n >= 7 ? 3 : n >= 4 ? 2 : n >= 2 ? 1 : 0;
+
+      let total = 0;
+      for (const p of correctPlayers) {
+        total += Math.min(lb(leagueCount[p.leagueId]) + nb(nationCount[p.nationId]) + cb(clubCount[p.teamId]), 3);
+      }
+      return total;
+    },
+
+    // 匈牙利算法：找最大二分图匹配（球员 -> 可踢位置）
+    _maxMatching(squad, positions) {
+      const n = squad.length;
+      const m = positions.length;
+      const matchPos = new Array(m).fill(-1);
+
+      function dfs(playerIdx, visited) {
+        for (let posIdx = 0; posIdx < m; posIdx++) {
+          if (visited[posIdx]) continue;
+          if (!squad[playerIdx].positions.includes(positions[posIdx])) continue;
+          visited[posIdx] = true;
+          if (matchPos[posIdx] === -1 || dfs(matchPos[posIdx], visited)) {
+            matchPos[posIdx] = playerIdx;
+            return true;
+          }
+        }
+        return false;
+      }
+
+      for (let i = 0; i < n; i++) {
+        const visited = new Array(m).fill(false);
+        dfs(i, visited);
+      }
+
+      const assignment = new Array(n).fill(null);
+      const correctPlayers = [];
+      const usedPosIdx = new Set();
+      for (let posIdx = 0; posIdx < m; posIdx++) {
+        if (matchPos[posIdx] !== -1) {
+          assignment[matchPos[posIdx]] = positions[posIdx];
+          correctPlayers.push(squad[matchPos[posIdx]]);
+          usedPosIdx.add(posIdx);
+        }
+      }
+
+      const remainingPosIdx = [];
+      for (let posIdx = 0; posIdx < m; posIdx++) {
+        if (!usedPosIdx.has(posIdx)) remainingPosIdx.push(posIdx);
+      }
+      let rp = 0;
+      for (let i = 0; i < n; i++) {
+        if (assignment[i] === null) {
+          assignment[i] = positions[remainingPosIdx[rp++]];
+        }
+      }
+
+      return { assignment, correctPlayers, matchPos };
+    },
+
+    // 计算阵容化学值（含位置匹配）
+    _calculateSquadChemistry(squad, formationPositions) {
+      const { assignment, correctPlayers } = this._maxMatching(squad, formationPositions);
+      const chemistry = this._calcChemistryForCorrectPlayers(correctPlayers);
+      return { chemistry, assignment, correctPlayers };
+    },
+
+    // ========== 贪心策略工厂 ==========
+
+    _makeAffinityStrategy(field) {
+      return (players, squad) => {
+        if (squad.length === 0) return [...players].sort((a, b) => b.rating - a.rating);
+        const counts = {};
+        for (const p of squad) counts[p[field]] = (counts[p[field]] || 0) + 1;
+        const bestId = Number(Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0]);
+        return [...players].sort((a, b) => {
+          const aMatch = a[field] === bestId ? 1 : 0;
+          const bMatch = b[field] === bestId ? 1 : 0;
+          if (aMatch !== bMatch) return bMatch - aMatch;
+          return b.rating - a.rating;
+        });
+      };
+    },
+
+    _makeTargetAffinityStrategy(field, targetIds) {
+      const idSet = new Set(targetIds);
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          const aMatch = idSet.has(a[field]) ? 1 : 0;
+          const bMatch = idSet.has(b[field]) ? 1 : 0;
+          if (aMatch !== bMatch) return bMatch - aMatch;
+          return b.rating - a.rating;
+        });
+      };
+    },
+
+    _makeDiversityStrategy(field) {
+      return (players, squad) => {
+        if (squad.length === 0) return [...players].sort((a, b) => b.rating - a.rating);
+        const existingIds = new Set(squad.map(p => p[field]));
+        return [...players].sort((a, b) => {
+          const aNew = existingIds.has(a[field]) ? 0 : 1;
+          const bNew = existingIds.has(b[field]) ? 0 : 1;
+          if (aNew !== bNew) return bNew - aNew;
+          return b.rating - a.rating;
+        });
+      };
+    },
+
+    _makeMaxCapStrategy(field, maxCount) {
+      return (players, squad) => {
+        if (squad.length === 0) return [...players].sort((a, b) => b.rating - a.rating);
+        const counts = {};
+        for (const p of squad) counts[p[field]] = (counts[p[field]] || 0) + 1;
+        return [...players].sort((a, b) => {
+          const aAt = (counts[a[field]] || 0) >= maxCount ? 1 : 0;
+          const bAt = (counts[b[field]] || 0) >= maxCount ? 1 : 0;
+          if (aAt !== bAt) return aAt - bAt;
+          const aRatio = (counts[a[field]] || 0) / maxCount;
+          const bRatio = (counts[b[field]] || 0) / maxCount;
+          if (Math.abs(aRatio - bRatio) > 0.01) return aRatio - bRatio;
+          return b.rating - a.rating;
+        });
+      };
+    },
+
+    _makeRarityGroupStrategy(groupId) {
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          const aIn = a.groups && a.groups.includes(groupId) ? 1 : 0;
+          const bIn = b.groups && b.groups.includes(groupId) ? 1 : 0;
+          if (aIn !== bIn) return bIn - aIn;
+          return b.rating - a.rating;
+        });
+      };
+    },
+
+    _makeCompositeStrategy(weights) {
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          let scoreA = 0, scoreB = 0;
+          for (const w of weights) {
+            if (w.targetIds) {
+              const idSet = new Set(w.targetIds);
+              scoreA += (idSet.has(a[w.field]) ? 1 : 0) * w.weight;
+              scoreB += (idSet.has(b[w.field]) ? 1 : 0) * w.weight;
+            } else if (w.diversity && squad.length > 0) {
+              const existingIds = new Set(squad.map(p => p[w.field]));
+              scoreA += (existingIds.has(a[w.field]) ? 0 : 1) * w.weight;
+              scoreB += (existingIds.has(b[w.field]) ? 0 : 1) * w.weight;
+            } else if (w.rarityGroup) {
+              scoreA += (a.groups && a.groups.includes(w.rarityGroup) ? 1 : 0) * w.weight;
+              scoreB += (b.groups && b.groups.includes(w.rarityGroup) ? 1 : 0) * w.weight;
+            } else if (w.maxCap && squad.length > 0) {
+              const counts = {};
+              for (const p of squad) counts[p[w.field]] = (counts[p[w.field]] || 0) + 1;
+              const aCnt = counts[a[w.field]] || 0;
+              const bCnt = counts[b[w.field]] || 0;
+              scoreA += (aCnt >= w.maxCap ? -2 : 0) * w.weight;
+              scoreB += (bCnt >= w.maxCap ? -2 : 0) * w.weight;
+              scoreA += (aCnt >= w.maxCap - 1 && aCnt < w.maxCap ? -0.5 : 0) * w.weight;
+              scoreB += (bCnt >= w.maxCap - 1 && bCnt < w.maxCap ? -0.5 : 0) * w.weight;
+            }
+          }
+          if (scoreA !== scoreB) return scoreB - scoreA;
+          return b.rating - a.rating;
+        });
+      };
+    },
+
+    // ========== 化学感知阵容求解器 ==========
+
+    // 球员ID生成
+    _chemPid(p) { return p.metaDataId || (p.name + '|' + p.teamId); },
+
+    // 球员价格（用于化学求解器内部排序）
+    _chemPrice(p) { return this.getPlayerPrice(p); },
+
+    // 检查球员是否匹配某个 ratingRange 条件
+    _playerMatchesRange(p, range) {
+      const qualityMap = { 1: [0, 64], 2: [65, 74], 3: [75, 99] };
+      let minR = range.min || 0;
+      let maxR = range.max || 999;
+      if (range.quality) {
+        const qrm = qualityMap[range.quality] || [0, 99];
+        if (range.scope === 0) {
+          minR = Math.max(minR, qrm[0]);
+        } else {
+          minR = Math.max(minR, qrm[0]);
+          maxR = Math.min(maxR, qrm[1]);
+        }
+      }
+      if (p.rating < minR || p.rating > maxR) return false;
+      if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
+      if (range.leagues && !range.leagues.includes(p.leagueId)) return false;
+      if (range.nations && !range.nations.includes(p.nationId)) return false;
+      if (range.clubs && !range.clubs.includes(p.teamId)) return false;
+      return true;
+    },
+
+    // 验证 ratingRanges 槽位约束
+    _validateRatingRanges(squad, requirements) {
+      const ranges = requirements.ratingRanges || [];
+      if (ranges.length === 0) return true;
+
+      const used = new Array(squad.length).fill(false);
+      for (const range of ranges) {
+        const needed = range.count || 0;
+        if (needed <= 0) continue;
+        const scope = range.scope != null ? range.scope : 0;
+
+        if (scope === 1) {
+          const total = squad.filter(p => this._playerMatchesRange(p, range)).length;
+          if (total > needed) return false;
+          continue;
+        }
+
+        let assigned = 0;
+        for (let i = 0; i < squad.length; i++) {
+          if (used[i]) continue;
+          if (this._playerMatchesRange(squad[i], range)) {
+            used[i] = true;
+            assigned++;
+            if (assigned >= needed) break;
+          }
+        }
+        if (assigned < needed) return false;
+      }
+      return true;
+    },
+
+    // 综合评估阵容是否满足所有约束
+    _evaluateSquad(squad, requirements, formationPositions) {
+      const squadSize = requirements.minPlayers || 11;
+      if (squad.length !== squadSize) return { valid: false };
+
+      const { assignment, correctPlayers, matchPos } = this._maxMatching(squad, formationPositions);
+      const chemistry = this._calcChemistryForCorrectPlayers(correctPlayers);
+
+      const teamRating = this.calculateTeamRating(squad.map(p => p.rating));
+      if (requirements.minTeamRating > 0 && teamRating < requirements.minTeamRating) return { valid: false };
+      if (requirements.minChemistry > 0 && chemistry < requirements.minChemistry) return { valid: false };
+
+      // 稀有度组人数检查
+      if (requirements.minRarityGroup !== null) {
+        const groupCount = squad.filter(p => p.groups && p.groups.includes(requirements.minRarityGroup)).length;
+        if (requirements.minRareCount > 0 && groupCount < requirements.minRareCount) return { valid: false };
+        if (requirements.maxRareCount > 0 && groupCount > requirements.maxRareCount) return { valid: false };
+      }
+
+      // 同俱乐部数量
+      const clubGroups = {};
+      for (const p of squad) clubGroups[p.teamId] = (clubGroups[p.teamId] || 0) + 1;
+      const maxSameClub = Math.max(...Object.values(clubGroups), 0);
+      if (requirements.sameClubMin > 0 && maxSameClub < requirements.sameClubMin) return { valid: false };
+      if (requirements.sameClubMax > 0 && maxSameClub > requirements.sameClubMax) return { valid: false };
+
+      // 同国籍数量
+      const nationGroups = {};
+      for (const p of squad) nationGroups[p.nationId] = (nationGroups[p.nationId] || 0) + 1;
+      const maxSameNation = Math.max(...Object.values(nationGroups), 0);
+      if (requirements.sameNationMin > 0 && maxSameNation < requirements.sameNationMin) return { valid: false };
+      if (requirements.sameNationMax > 0 && maxSameNation > requirements.sameNationMax) return { valid: false };
+
+      // 同联赛数量
+      const leagueGroups = {};
+      for (const p of squad) leagueGroups[p.leagueId] = (leagueGroups[p.leagueId] || 0) + 1;
+      const maxSameLeague = Math.max(...Object.values(leagueGroups), 0);
+      if (requirements.sameLeagueMin > 0 && maxSameLeague < requirements.sameLeagueMin) return { valid: false };
+      if (requirements.sameLeagueMax > 0 && maxSameLeague > requirements.sameLeagueMax) return { valid: false };
+
+      // 不同国籍数量
+      const uniqueNations = new Set(squad.map(p => p.nationId)).size;
+      if (requirements.nationCountMin > 0 && uniqueNations < requirements.nationCountMin) return { valid: false };
+      if (requirements.nationCountMax > 0 && uniqueNations > requirements.nationCountMax) return { valid: false };
+
+      // 不同联赛数量
+      const uniqueLeagues = new Set(squad.map(p => p.leagueId)).size;
+      if (requirements.leagueCountMin > 0 && uniqueLeagues < requirements.leagueCountMin) return { valid: false };
+      if (requirements.leagueCountMax > 0 && uniqueLeagues > requirements.leagueCountMax) return { valid: false };
+
+      // 不同俱乐部数量
+      const uniqueClubs = new Set(squad.map(p => p.teamId)).size;
+      if (requirements.clubCountMin > 0 && uniqueClubs < requirements.clubCountMin) return { valid: false };
+      if (requirements.clubCountMax > 0 && uniqueClubs > requirements.clubCountMax) return { valid: false };
+
+      // 传奇数量
+      const legendCount = squad.filter(p => p.leagueId === 2124 || p.nationId === 0).length;
+      if (requirements.legendCountMin > 0 && legendCount < requirements.legendCountMin) return { valid: false };
+      if (requirements.legendCountMax > 0 && legendCount > requirements.legendCountMax) return { valid: false };
+
+      // 首发球员数量
+      const firstOwnerCount = squad.filter(p => p._item && p._item.isFirstOwner).length;
+      if (requirements.firstOwnerMin > 0 && firstOwnerCount < requirements.firstOwnerMin) return { valid: false };
+      if (requirements.firstOwnerMax > 0 && firstOwnerCount > requirements.firstOwnerMax) return { valid: false };
+
+      // ratingRanges 槽位约束
+      if (!this._validateRatingRanges(squad, requirements)) return { valid: false };
+
+      return { valid: true, assignment, correctPlayers, chemistry, matchPos };
+    },
+
+    // 化学贡献评分（用于化学亲和策略排序）
+    _chemScore(player, squad) {
+      let score = 0;
+      for (const p of squad) {
+        if (p.leagueId === player.leagueId) score += 1;
+        if (p.nationId === player.nationId) score += 1;
+        if (p.teamId === player.teamId) score += 2;
+      }
+      return score;
+    },
+
+    // 贪心找初始可行解
+    _chemGreedyFindSolution(pool, requirements, formationPositions, sortFn) {
+      const squadSize = requirements.minPlayers || 11;
+      const usedIds = new Set();
+      const squad = [];
+
+      const canPick = (p) => !usedIds.has(this._chemPid(p));
+      const doPick = (p) => { squad.push(p); usedIds.add(this._chemPid(p)); };
+
+      // 第 1 步：优先满足稀有度组约束
+      if (requirements.minRareCount > 0 && requirements.minRarityGroup !== null) {
+        const rarePool = pool.filter(p => canPick(p) && p.groups && p.groups.includes(requirements.minRarityGroup));
+        const sortedRares = sortFn(rarePool, squad);
+        for (let i = 0; squad.length < requirements.minRareCount && i < sortedRares.length; i++) {
+          doPick(sortedRares[i]);
+        }
+      }
+
+      // 第 1.5 步：优先满足 ratingRanges 中 scope!=1 的硬性槽位约束
+      const hardRanges = (requirements.ratingRanges || []).filter(r => r.scope !== 1);
+      for (const range of hardRanges) {
+        const needed = range.count || 0;
+        if (needed <= 0) continue;
+
+        let minR = range.min || 0;
+        let maxR = range.max || 999;
+        if (range.quality) {
+          const qrm = { 1: [0, 64], 2: [65, 74], 3: [75, 99] };
+          if (range.scope === 0) {
+            [minR] = qrm[range.quality] || [0, 99];
+          } else {
+            [minR, maxR] = qrm[range.quality] || [0, 99];
+          }
+        }
+
+        const currentMatches = squad.filter(p => {
+          if (p.rating < minR || p.rating > maxR) return false;
+          if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
+          if (range.leagues && !range.leagues.includes(p.leagueId)) return false;
+          if (range.nations && !range.nations.includes(p.nationId)) return false;
+          if (range.clubs && !range.clubs.includes(p.teamId)) return false;
+          return true;
+        }).length;
+        const stillNeed = needed - currentMatches;
+        if (stillNeed <= 0) continue;
+
+        const rangePool = pool.filter(p => {
+          if (!canPick(p)) return false;
+          if (p.rating < minR || p.rating > maxR) return false;
+          if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
+          if (range.leagues && !range.leagues.includes(p.leagueId)) return false;
+          if (range.nations && !range.nations.includes(p.nationId)) return false;
+          if (range.clubs && !range.clubs.includes(p.teamId)) return false;
+          return true;
+        });
+        const sorted = sortFn(rangePool, squad);
+        for (let i = 0; i < stillNeed && i < sorted.length; i++) {
+          doPick(sorted[i]);
+        }
+      }
+
+      // 第 2 步：贪心填充剩余位置
+      while (squad.length < squadSize) {
+        const remaining = pool.filter(p => canPick(p));
+        if (remaining.length === 0) break;
+
+        const sorted = sortFn(remaining, squad);
+        doPick(sorted[0]);
+      }
+
+      const ev = this._evaluateSquad(squad, requirements, formationPositions);
+      return ev.valid ? { squad, ...ev } : null;
+    },
+
+    // 局部搜索降成本
+    _chemLocalSearch(squad, requirements, formationPositions) {
+      let assignment = null, correctPlayers = null, chemistry = 0;
+      let improved = true;
+      let iterations = 0;
+      const maxIterations = 500;
+
+      while (improved && iterations < maxIterations) {
+        improved = false;
+        iterations++;
+
+        const currentPrice = squad.reduce((s, p) => s + this._chemPrice(p), 0);
+        const squadIds = new Set(squad.map(p => this._chemPid(p)));
+
+        const order = squad.map((p, i) => ({ idx: i, price: this._chemPrice(p) }))
+                           .sort((a, b) => b.price - a.price);
+
+        for (const { idx } of order) {
+          const candidates = this._chemPool.filter(p => {
+            if (squadIds.has(this._chemPid(p))) return false;
+            if (this._chemPrice(p) >= this._chemPrice(squad[idx])) return false;
+            return true;
+          }).sort((a, b) => this._chemPrice(a) - this._chemPrice(b));
+
+          for (const cand of candidates.slice(0, 30)) {
+            const newSquad = [...squad];
+            newSquad[idx] = cand;
+            const ev = this._evaluateSquad(newSquad, requirements, formationPositions);
+            if (ev.valid) {
+              const newPrice = newSquad.reduce((s, p) => s + this._chemPrice(p), 0);
+              if (newPrice < currentPrice) {
+                squad = newSquad;
+                assignment = ev.assignment;
+                correctPlayers = ev.correctPlayers;
+                chemistry = ev.chemistry;
+                improved = true;
+                break;
+              }
+            }
+          }
+          if (improved) break;
+        }
+      }
+
+      console.log("[EAFC Grinder] 化学求解器-局部搜索迭代次数:", iterations);
+      return { squad, assignment, correctPlayers, chemistry };
+    },
+
+    // 扰动
+    _chemPerturb(squad, k, mode) {
+      const n = squad.length;
+      const newSquad = [...squad];
+
+      if (mode === 'swap') {
+        const i = Math.floor(Math.random() * n);
+        const j = (i + 1 + Math.floor(Math.random() * (n - 1))) % n;
+        [newSquad[i], newSquad[j]] = [newSquad[j], newSquad[i]];
+        return newSquad;
+      }
+
+      const idxPool = Array.from({ length: n }, (_, i) => i);
+      for (let i = 0; i < k; i++) {
+        const j = i + Math.floor(Math.random() * (n - i));
+        [idxPool[i], idxPool[j]] = [idxPool[j], idxPool[i]];
+      }
+
+      const squadIds = new Set(squad.map(p => this._chemPid(p)));
+
+      for (let i = 0; i < k; i++) {
+        const idx = idxPool[i];
+        const oldPrice = this._chemPrice(newSquad[idx]);
+        const notInSquad = this._chemPool.filter(p => !squadIds.has(this._chemPid(p)));
+        if (notInSquad.length === 0) break;
+
+        const cheaper = notInSquad.filter(p => this._chemPrice(p) < oldPrice);
+        let cand;
+        if (cheaper.length > 0 && Math.random() < 0.8) {
+          cand = cheaper[Math.floor(Math.random() * cheaper.length)];
+        } else {
+          cand = notInSquad[Math.floor(Math.random() * notInSquad.length)];
+        }
+
+        squadIds.delete(this._chemPid(newSquad[idx]));
+        squadIds.add(this._chemPid(cand));
+        newSquad[idx] = cand;
+      }
+
+      return newSquad;
+    },
+
+    // 模拟退火
+    _chemSimulatedAnnealing(initialSquad, requirements, formationPositions) {
+      let currentSquad = [...initialSquad];
+      let ev = this._evaluateSquad(currentSquad, requirements, formationPositions);
+      let currentAssignment = ev.assignment;
+      let currentCorrectPlayers = ev.correctPlayers;
+      let currentChemistry = ev.chemistry;
+      let currentPrice = currentSquad.reduce((s, p) => s + this._chemPrice(p), 0);
+
+      let bestSquad = [...currentSquad];
+      let bestAssignment = currentAssignment;
+      let bestCorrectPlayers = currentCorrectPlayers;
+      let bestChemistry = currentChemistry;
+      let bestPrice = currentPrice;
+
+      // 自适应初始温度
+      let sampleDelta = 0;
+      let sampleCount = 0;
+      for (let i = 0; i < 100; i++) {
+        const mode = Math.random() < 0.7 ? 'replace' : 'swap';
+        const k = mode === 'replace' ? (1 + Math.floor(Math.random() * 2)) : 1;
+        const newSquad = this._chemPerturb(currentSquad, k, mode);
+        const newEv = this._evaluateSquad(newSquad, requirements, formationPositions);
+        if (newEv.valid) {
+          sampleDelta += Math.abs(newSquad.reduce((s, p) => s + this._chemPrice(p), 0) - currentPrice);
+          sampleCount++;
+        }
+      }
+      const avgDelta = sampleCount > 0 ? sampleDelta / sampleCount : currentPrice * 0.03;
+      let T = Math.max(avgDelta * 1.5, currentPrice * 0.015, 5000);
+      const Tmin = Math.max(avgDelta * 0.005, 50);
+      const alpha = 0.9995;
+      const maxIter = 10000; // 浏览器环境降低迭代次数
+
+      let accepted = 0;
+      let improved = 0;
+      let validCount = 0;
+
+      for (let iter = 0; iter < maxIter && T > Tmin; iter++) {
+        const mode = Math.random() < 0.7 ? 'replace' : 'swap';
+        let k = 1;
+        if (mode === 'replace') {
+          k = T > avgDelta ? (Math.random() < 0.5 ? 2 : 3) : 1;
+        }
+
+        const newSquad = this._chemPerturb(currentSquad, k, mode);
+        const newEv = this._evaluateSquad(newSquad, requirements, formationPositions);
+
+        if (newEv.valid) {
+          validCount++;
+          const newPrice = newSquad.reduce((s, p) => s + this._chemPrice(p), 0);
+          const delta = newPrice - currentPrice;
+
+          if (delta < 0 || Math.random() < Math.exp(-delta / T)) {
+            currentSquad = newSquad;
+            currentAssignment = newEv.assignment;
+            currentCorrectPlayers = newEv.correctPlayers;
+            currentChemistry = newEv.chemistry;
+            currentPrice = newPrice;
+            accepted++;
+
+            if (newPrice < bestPrice) {
+              bestSquad = [...newSquad];
+              bestAssignment = newEv.assignment;
+              bestCorrectPlayers = newEv.correctPlayers;
+              bestChemistry = newEv.chemistry;
+              bestPrice = newPrice;
+              improved++;
+            }
+          }
+        }
+
+        T *= alpha;
+      }
+
+      console.log("[EAFC Grinder] 化学求解器-SA 迭代:", maxIter, "有效:", validCount, "接受:", accepted, "改进:", improved, "最优:", bestPrice.toLocaleString());
+      return { squad: bestSquad, assignment: bestAssignment, correctPlayers: bestCorrectPlayers, chemistry: bestChemistry };
+    },
+
+    // 化学感知阵容选择主入口
+    async selectOptimalSquadWithChemistry(eligiblePlayers, requirements, fillRatings, controller) {
+      console.log("[EAFC Grinder] === 化学感知求解器启动 ===");
+
+      // 获取阵型位置
+      const formation = controller._challenge.formation;
+      const formationData = repositories.Squad.getFormation(formation);
+      const brickIndices = controller._squad.getAllBrickIndices ? controller._squad.getAllBrickIndices() : [];
+      const formationPositions = formationData.generalPositions.filter((_, i) => !brickIndices.includes(i));
+
+      // 构建候选池（已由 filterEligiblePlayers 预过滤）
+      this._chemPool = eligiblePlayers;
+      console.log("[EAFC Grinder] 化学求解器-候选池:", eligiblePlayers.length, "阵型位置:", formationPositions);
+
+      // 注册动态策略
+      const greedyStrategies = {
+        rating: (players) => [...players].sort((a, b) => b.rating - a.rating),
+        chemistry: (players, squad) => [...players].sort((a, b) => this._chemScore(b, squad) - this._chemScore(a, squad)),
+        random: (players) => [...players].sort(() => Math.random() - 0.5),
+      };
+
+      const dynamicStrategies = {};
+      const dynamicStrategyNames = [];
+
+      if (requirements.sameNationMin >= 5) {
+        dynamicStrategies.nation = this._makeAffinityStrategy('nationId');
+        dynamicStrategyNames.push('nation');
+      }
+      if (requirements.sameLeagueMin >= 5) {
+        dynamicStrategies.league = this._makeAffinityStrategy('leagueId');
+        dynamicStrategyNames.push('league');
+      }
+      if (requirements.sameClubMin >= 3) {
+        dynamicStrategies.club = this._makeAffinityStrategy('teamId');
+        dynamicStrategyNames.push('club');
+      }
+
+      // 从 ratingRanges 提取亲和策略
+      const rangeNations = new Set(), rangeClubs = new Set(), rangeLeagues = new Set();
+      for (const range of (requirements.ratingRanges || [])) {
+        if (range.nations) range.nations.forEach(n => rangeNations.add(n));
+        if (range.clubs) range.clubs.forEach(c => rangeClubs.add(c));
+        if (range.leagues) range.leagues.forEach(l => rangeLeagues.add(l));
+      }
+      if (rangeNations.size > 0) {
+        dynamicStrategies.rangeNation = this._makeTargetAffinityStrategy('nationId', [...rangeNations]);
+        dynamicStrategyNames.push('rangeNation');
+      }
+      if (rangeClubs.size > 0) {
+        dynamicStrategies.rangeClub = this._makeTargetAffinityStrategy('teamId', [...rangeClubs]);
+        dynamicStrategyNames.push('rangeClub');
+      }
+      if (rangeLeagues.size > 0) {
+        dynamicStrategies.rangeLeague = this._makeTargetAffinityStrategy('leagueId', [...rangeLeagues]);
+        dynamicStrategyNames.push('rangeLeague');
+      }
+
+      // 多样性策略
+      if (requirements.clubCountMin > 0) {
+        dynamicStrategies.clubDiv = this._makeDiversityStrategy('teamId');
+        dynamicStrategyNames.push('clubDiv');
+      }
+      if (requirements.nationCountMin > 0) {
+        dynamicStrategies.nationDiv = this._makeDiversityStrategy('nationId');
+        dynamicStrategyNames.push('nationDiv');
+      }
+      if (requirements.leagueCountMin > 0) {
+        dynamicStrategies.leagueDiv = this._makeDiversityStrategy('leagueId');
+        dynamicStrategyNames.push('leagueDiv');
+      }
+
+      // 上限感知策略
+      if (requirements.sameClubMax > 0) {
+        dynamicStrategies.clubCap = this._makeMaxCapStrategy('teamId', requirements.sameClubMax);
+        dynamicStrategyNames.push('clubCap');
+      }
+      if (requirements.sameNationMax > 0) {
+        dynamicStrategies.nationCap = this._makeMaxCapStrategy('nationId', requirements.sameNationMax);
+        dynamicStrategyNames.push('nationCap');
+      }
+      if (requirements.sameLeagueMax > 0) {
+        dynamicStrategies.leagueCap = this._makeMaxCapStrategy('leagueId', requirements.sameLeagueMax);
+        dynamicStrategyNames.push('leagueCap');
+      }
+
+      // 稀有组策略
+      if (requirements.minRareCount > 0 && requirements.minRarityGroup != null) {
+        dynamicStrategies.rarityGroup = this._makeRarityGroupStrategy(requirements.minRarityGroup);
+        dynamicStrategyNames.push('rarityGroup');
+      }
+
+      // 组合策略
+      const compositeWeights = [];
+      if (rangeNations.size > 0) compositeWeights.push({ field: 'nationId', targetIds: [...rangeNations], weight: 3 });
+      if (rangeClubs.size > 0) compositeWeights.push({ field: 'teamId', targetIds: [...rangeClubs], weight: 3 });
+      if (rangeLeagues.size > 0) compositeWeights.push({ field: 'leagueId', targetIds: [...rangeLeagues], weight: 3 });
+      if (requirements.clubCountMin > 0) compositeWeights.push({ field: 'teamId', diversity: true, weight: 2 });
+      if (requirements.nationCountMin > 0) compositeWeights.push({ field: 'nationId', diversity: true, weight: 2 });
+      if (requirements.leagueCountMin > 0) compositeWeights.push({ field: 'leagueId', diversity: true, weight: 2 });
+      if (requirements.minRareCount > 0 && requirements.minRarityGroup != null) compositeWeights.push({ rarityGroup: requirements.minRarityGroup, weight: 2 });
+      if (requirements.sameClubMax > 0) compositeWeights.push({ field: 'teamId', maxCap: requirements.sameClubMax, weight: 3 });
+      if (requirements.sameNationMax > 0) compositeWeights.push({ field: 'nationId', maxCap: requirements.sameNationMax, weight: 3 });
+      if (requirements.sameLeagueMax > 0) compositeWeights.push({ field: 'leagueId', maxCap: requirements.sameLeagueMax, weight: 3 });
+      if (compositeWeights.length >= 2) {
+        dynamicStrategies.composite = this._makeCompositeStrategy(compositeWeights);
+        dynamicStrategyNames.push('composite');
+      }
+
+      Object.assign(greedyStrategies, dynamicStrategies);
+      console.log("[EAFC Grinder] 化学求解器-动态策略:", dynamicStrategyNames);
+
+      // 让浏览器渲染进度条的辅助
+      const pause = () => new Promise(r => setTimeout(r, 0));
+
+      // 执行贪心搜索
+      const strategies = [...dynamicStrategyNames, 'rating', 'chemistry', 'random', 'random', 'random'];
+      const initialSolutions = [];
+      let randomCount = 0;
+
+      for (let si = 0; si < strategies.length; si++) {
+        const name = strategies[si];
+        const displayName = name === 'random' ? `random_${++randomCount}` : name;
+        if (this._chemProgress) { this._chemProgress(Math.round(si / strategies.length * 20)); await pause(); }
+        const sol = this._chemGreedyFindSolution(eligiblePlayers, requirements, formationPositions, greedyStrategies[name]);
+        if (sol) {
+          const cost = sol.squad.reduce((s, p) => s + this._chemPrice(p), 0);
+          console.log("[EAFC Grinder] 化学求解器-找到初始解, 成本:", cost.toLocaleString(), "化学:", sol.chemistry);
+          initialSolutions.push({ name: displayName, ...sol });
+        } else {
+          console.log("[EAFC Grinder] 化学求解器-未找到初始解");
+        }
+      }
+
+      // 确定性策略全失败，跑随机兜底
+      if (initialSolutions.length === 0) {
+        console.log("[EAFC Grinder] 化学求解器-确定性策略全失败，启动随机兜底...");
+        for (let i = 0; i < 20; i++) {
+          const sol = this._chemGreedyFindSolution(eligiblePlayers, requirements, formationPositions, greedyStrategies.random);
+          if (sol) {
+            const cost = sol.squad.reduce((s, p) => s + this._chemPrice(p), 0);
+            console.log("[EAFC Grinder] 化学求解器-随机策略找到初始解, 成本:", cost.toLocaleString());
+            initialSolutions.push({ name: `random_${i + 1}`, ...sol });
+            break;
+          }
+        }
+      }
+
+      if (initialSolutions.length === 0) {
+        throw new Error("化学感知求解器无法找到满足所有约束的阵容");
+      }
+
+      // 对每个初始解跑 localSearch + SA
+      let globalBest = null;
+      const totalRuns = initialSolutions.length; // each: LS + 2 SA = 3 sub-steps
+      let step = 0;
+      const totalSteps = totalRuns * 3;
+      for (let ii = 0; ii < initialSolutions.length; ii++) {
+        const initial = initialSolutions[ii];
+        step++;
+        if (this._chemProgress) { this._chemProgress(20 + Math.round(step / totalSteps * 80)); await pause(); }
+        const lsResult = this._chemLocalSearch(initial.squad, requirements, formationPositions);
+        const lsCost = lsResult.squad.reduce((s, p) => s + this._chemPrice(p), 0);
+        console.log("[EAFC Grinder] 化学求解器-局部搜索后成本:", lsCost.toLocaleString());
+
+        let bestSa = lsResult;
+        for (let run = 0; run < 2; run++) {
+          step++;
+          if (this._chemProgress) { this._chemProgress(20 + Math.round(step / totalSteps * 80)); await pause(); }
+          const saResult = this._chemSimulatedAnnealing(lsResult.squad, requirements, formationPositions);
+          if (saResult.squad.reduce((s, p) => s + this._chemPrice(p), 0) < bestSa.squad.reduce((s, p) => s + this._chemPrice(p), 0)) {
+            bestSa = saResult;
+          }
+        }
+        const saCost = bestSa.squad.reduce((s, p) => s + this._chemPrice(p), 0);
+        console.log("[EAFC Grinder] 化学求解器-SA后最优成本:", saCost.toLocaleString());
+
+        if (!globalBest || saCost < globalBest.squad.reduce((s, p) => s + this._chemPrice(p), 0)) {
+          globalBest = bestSa;
+        }
+      }
+
+      // 按 assignment 重排阵容：assignment[playerIdx] = positionValue，映射到 formationPositions 索引
+      const { assignment } = this._maxMatching(globalBest.squad, formationPositions);
+      const finalSquad = new Array(formationPositions.length).fill(null);
+      const squad = globalBest.squad;
+      const usedSlots = new Set();
+      // 第一轮：精确匹配，球员放到对应位置槽
+      for (let pi = 0; pi < squad.length; pi++) {
+        const posVal = assignment[pi];
+        for (let fi = 0; fi < formationPositions.length; fi++) {
+          if (usedSlots.has(fi)) continue;
+          if (formationPositions[fi] === posVal) {
+            finalSquad[fi] = squad[pi];
+            usedSlots.add(fi);
+            break;
+          }
+        }
+      }
+      // 第二轮：剩余球员填空位
+      for (let pi = 0; pi < squad.length; pi++) {
+        if (usedSlots.size >= formationPositions.length) break;
+        if (finalSquad.some(s => s === squad[pi])) continue;
+        for (let fi = 0; fi < formationPositions.length; fi++) {
+          if (finalSquad[fi] != null) continue;
+          finalSquad[fi] = squad[pi];
+          break;
+        }
+      }
+      const orderedSquad = finalSquad.filter(p => p != null);
+
+      const finalCost = orderedSquad.reduce((s, p) => s + this._chemPrice(p), 0);
+      console.log("[EAFC Grinder] 化学求解器-最终成本:", finalCost.toLocaleString(), "化学:", globalBest.chemistry);
+
+      // 清理临时状态
+      delete this._chemPool;
+
+      return orderedSquad;
     },
 
     // 获取库存评分分布（club + storage）
@@ -2535,15 +3574,21 @@
         return true;
       });
 
-      // 将 count === totalSlots 的 ratingRanges 条件提升为硬过滤
+      // 将 scope=0/2 且 count === totalSlots 的 ratingRanges 条件提升为硬过滤
       if (ratingRanges && ratingRanges.length > 0) {
         for (const range of ratingRanges) {
           if (range.count !== totalSlots) continue;
+          if (range.scope === 1) continue; // scope=1 (至多) 不提升为硬过滤
           let minR = range.min || 0;
           let maxR = range.max || 999;
-          if (range.quality === 1) { minR = 0; maxR = 64; }
-          else if (range.quality === 2) { minR = 65; maxR = 74; }
-          else if (range.quality === 3) { minR = 75; maxR = 99; }
+          if (range.quality) {
+            const qrm = { 1: [0, 64], 2: [65, 74], 3: [75, 99] };
+            if (range.scope === 0) {
+              [minR] = qrm[range.quality] || [0, 99];
+            } else {
+              [minR, maxR] = qrm[range.quality] || [0, 99];
+            }
+          }
           uniquePlayers = uniquePlayers.filter(p => {
             if (p.rating < minR || p.rating > maxR) return false;
             if (range.exactRare != null && p.rareflag !== range.exactRare) return false;
@@ -2618,12 +3663,18 @@
       let slotPlans = [{ players: [], ratings: [], cost: 0 }];
       if (ratingRanges && ratingRanges.length > 0) {
         for (const range of ratingRanges) {
+          // scope=1 (至多) 不作为槽位需求处理
+          if (range.scope === 1) continue;
+
           let minRating = range.min || 0;
           let maxRating = range.max || 999;
           if (range.quality) {
-            if (range.quality === 1) { minRating = 0; maxRating = 64; }
-            else if (range.quality === 2) { minRating = 65; maxRating = 74; }
-            else if (range.quality === 3) { minRating = 75; maxRating = 99; }
+            const qrm = { 1: [0, 64], 2: [65, 74], 3: [75, 99] };
+            if (range.scope === 0) {
+              [minRating] = qrm[range.quality] || [0, 99];
+            } else {
+              [minRating, maxRating] = qrm[range.quality] || [0, 99];
+            }
           }
 
           const candidates = uniquePlayers.filter(p => {

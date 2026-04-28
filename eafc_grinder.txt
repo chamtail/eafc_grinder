@@ -1423,6 +1423,8 @@
         sections.forEach(section => {
           const playerItems = section.querySelectorAll("li.listFUTItem:not(.has-action)");
           playerItems.forEach(li => {
+            // 跳过非球员物品（徽章、球衣等没有 .player 类）
+            if (!li.querySelector(".player.item")) return;
             const key = extractKeyFromLi(li);
             const items = itemMap[key];
             const item = items && items.length > 0 ? items.shift() : null;
@@ -1462,11 +1464,12 @@
         const sections = document.querySelectorAll(".ut-sectioned-item-list-view");
         if (sections.length === 0) return;
 
-        // 检查是否还有没渲染价格的卡
+        // 检查是否还有没渲染价格的球员卡（跳过非球员物品）
         let needsRender = false;
         sections.forEach(section => {
           const items = section.querySelectorAll("li.listFUTItem:not(.has-action)");
           items.forEach(li => {
+            if (!li.querySelector(".player.item")) return;
             if (!li.querySelector(`.${PRICE_LABEL_CLASS}`)) {
               needsRender = true;
             }
@@ -2394,19 +2397,19 @@
         }
 
         if (!found) {
-          // 打印第一个82分卡为什么不能选
-          const p82 = sortedPlayers.find(p => p.rating === 82);
-          if (p82) {
-            const usedId = usedPlayerIds.has(p82.id);
-            const mid = p82._item?._metaData?.id;
-            const usedMid = mid != null && usedMetaDataIds.has(mid);
-            console.log(`[EAFC Grinder] 第一个82分卡: ${p82.name}, id=${p82.id}, metaDataId=${mid}, usedId=${usedId}, usedMid=${usedMid}, rareflag=${p82.rareflag}`);
+          // 无 TEAM_RATING 需求时，选最便宜的非特殊卡
+          for (const p of sortedPlayers) {
+            if (!canPick(p)) continue;
+            if (p.rareflag > 1) continue;
+            pick(p);
+            found = true;
+            break;
           }
-          // 没卡可pick了，报错
-          throw new Error(`库存中可用球员不足，已选 ${squad.length}/${totalNeeded} 人，无法继续填充`);
         }
 
-        if (!found) break;
+        if (!found) {
+          throw new Error(`库存中可用球员不足，已选 ${squad.length}/${totalNeeded} 人，无法继续填充`);
+        }
       }
 
       return squad;

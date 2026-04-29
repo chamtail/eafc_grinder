@@ -1258,22 +1258,6 @@
               });
               console.log(`[EAFC Grinder] 全量价格加载完成: ${count} 张卡, ${reqTime}ms`);
 
-              // 打印所有球员的 SBC 信息（含价格和 metaDataId）
-              const allSbcPlayers = [...self.getClubPlayers(), ...self.getStoragePlayers()];
-              const sbcData = allSbcPlayers.map(p => ({
-                name: p.name,
-                basePossiblePositions: p.positions,
-                teamId: p.teamId,
-                nationId: p.nationId,
-                leagueId: p.leagueId,
-                _rareflag: p.rareflag,
-                _rating: p.rating,
-                groups: p.groups,
-                metaDataId: p.metaDataId,
-                price: self.priceCacheMap[p.definitionId] || 0
-              }));
-              console.log("[EAFC Grinder] SBC球员数据:", JSON.stringify(sbcData));
-
               self.renderPanel();
             }
           } catch (e) {
@@ -1933,11 +1917,9 @@
           console.log("[EAFC Grinder] challenge metadata:", controller._challenge);
         } catch(e) {}
 
-        console.log("[EAFC Grinder] SBC 需求:", squadRequirements);
-
         // === 当存在化学要求时，跳过 calculateFillRatings，直接走化学感知求解器 ===
         if (squadRequirements.minChemistry > 0) {
-          console.log("[EAFC Grinder] >>> 走化学感知求解器分支 (跳过 calculateFillRatings)");
+          console.log("[EAFC Grinder] >>> 化学感知求解器分支");
 
           // 显示加载遮盖（与球员数据加载风格一致）
           const overlay = document.createElement('div');
@@ -2021,7 +2003,7 @@
         const eligiblePlayers = this.filterEligiblePlayers(squadRequirements);
 
         // 选择最优阵容（评分最低但符合条件，若存在 TEAM_RATING 则按 fillRatings 指导）
-        console.log("[EAFC Grinder] >>> 走原有快速填充分支");
+        console.log("[EAFC Grinder] >>> 快速填充分支");
         const optimalSquad = this.selectOptimalSquad(eligiblePlayers, squadRequirements, fillRatings);
 
         // 计算需要的球员数
@@ -2213,7 +2195,6 @@
                   reqs.minRareCount = count > 0 ? count : 1;
                   reqs.maxRareCount = count > 0 ? count : 1;
                 }
-                console.log("[EAFC Grinder DEBUG] PLAYER_RARITY_GROUP value:", firstValue, "count:", count, "scope:", scope, "raw value:", value);
                 isGlobal = true;
                 break;
               case 26: // PLAYER_MIN_OVR
@@ -2251,8 +2232,7 @@
           // 解析单条需求失败，跳过
         }
       });
-
-      console.log("[EAFC Grinder] 解析后的SBC需求:", JSON.stringify(reqs));
+      console.log("[EAFC Grinder] SBC 需求:", reqs);
       return reqs;
     },
 
@@ -2365,14 +2345,18 @@
 
       const totalNeeded = requirements.minPlayers || 11;
 
-      // 排序优先级：不可交易 > 价格低 > common(0) > rare(1) > 特殊卡 > 仓库球员优先 > 评分低的优先
+      // 排序优先级：不可交易 > common(0) > rare(1) > 特殊卡 > 83以下重复仓库球员优先 > 价格低 > 重复仓库球员优先 > 评分低的优先
       const sortedPlayers = [...eligiblePlayers].sort((a, b) => {
         if (a.tradable !== b.tradable) return a.tradable ? 1 : -1;
+        if (a.rareflag !== b.rareflag) return a.rareflag - b.rareflag;
+        if (a.isStorage !== b.isStorage) {
+		if (a.isStorage && a.rating <= 83) return -1;
+		if (b.isStorage && b.rating <= 83) return 1;
+	}
         const valA = this.getPlayerPrice(a);
         const valB = this.getPlayerPrice(b);
         if (valA !== valB) return valA - valB;
-        if (a.rareflag !== b.rareflag) return a.rareflag - b.rareflag;
-        if (a.isStorage !== b.isStorage) return a.isStorage ? -1 : 1;
+	if (a.isStorage !== b.isStorage) return a.isStorage ? -1 : 1;
         return a.rating - b.rating;
       });
 

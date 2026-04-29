@@ -39,6 +39,9 @@
     panelPosition: { left: 0, right: 0, top: 0 },
     sbcFillButton: null, // SBC填充按钮
     currentChallenge: null, // 当前SBC挑战
+    sbcQuickNavList: [], // SBC快捷栏列表 [{id, assetId}]
+    sbcQuickNavDeleteMode: false, // SBC快捷栏删除模式
+    sbcQuickNavMaxCount: 5, // SBC快捷栏最大数量
     priceMap: null,
     priceCacheMap: {},  // 统一价格缓存：definitionId -> price（所有卡）
     _fetchingDefIds: new Set(),
@@ -268,7 +271,7 @@
         display: none;
       }
       .grinder-panel.collapsed {
-        max-height: 120px;
+        max-height: 220px;
         overflow: hidden;
       }
       .grinder-tabs {
@@ -365,6 +368,104 @@
         color: #a4a9b4;
         margin-top: 10px;
       }
+      .eafc-grinder-quicknav-btn {
+        position: absolute;
+        bottom: 4px;
+        right: 4px;
+        z-index: 10;
+        background: rgba(246, 184, 3, 0.9);
+        color: #000;
+        border: none;
+        border-radius: 4px;
+        padding: 3px 6px;
+        font-size: 10px;
+        font-weight: bold;
+        cursor: pointer;
+        font-family: 'UltimateTeam', sans-serif;
+        line-height: 1.2;
+      }
+      .eafc-grinder-quicknav-btn:hover {
+        background: #f6b803;
+      }
+      .grinder-sbc-quicknav {
+        margin-bottom: 6px;
+        padding: 6px;
+        background: rgba(59, 71, 84, 0.4);
+        border-radius: 6px;
+      }
+      .grinder-sbc-quicknav-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+      .grinder-sbc-quicknav-header span {
+        font-size: 12px;
+        color: #f6b803;
+        font-weight: bold;
+      }
+      .grinder-sbc-quicknav-delete-toggle {
+        background: rgba(59, 71, 84, 0.8);
+        border: 1px solid #a4a9b4;
+        color: #a4a9b4;
+        border-radius: 4px;
+        padding: 2px 6px;
+        font-size: 10px;
+        cursor: pointer;
+        font-family: 'UltimateTeam', sans-serif;
+      }
+      .grinder-sbc-quicknav-delete-toggle.active {
+        background: #d32f2f;
+        color: #fff;
+        border-color: #d32f2f;
+      }
+      .grinder-sbc-quicknav-icons {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .grinder-sbc-quicknav-item {
+        width: 40px;
+        height: 40px;
+        border-radius: 4px;
+        overflow: hidden;
+        cursor: pointer;
+        background: rgba(20, 25, 40, 0.6);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: opacity 0.2s;
+        position: relative;
+        -webkit-tap-highlight-color: transparent;
+        user-select: none;
+        -webkit-touch-callout: none;
+      }
+      .grinder-sbc-quicknav-item img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        pointer-events: none;
+      }
+      @media (hover: hover) {
+        .grinder-sbc-quicknav-item:hover {
+          box-shadow: 0 0 0 2px #f6b803;
+        }
+      }
+      .grinder-sbc-quicknav-item.delete-mode {
+        opacity: 0.4;
+      }
+      .grinder-sbc-quicknav-item.delete-mode::after {
+        content: '×';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #d32f2f;
+        font-size: 20px;
+        font-weight: bold;
+        text-shadow: 0 0 2px #fff;
+        pointer-events: none;
+      }
     `,
 
     init() {
@@ -376,6 +477,7 @@
       this.loadAllPlayers();
       this.initAutoRefreshListener();
       this.initUnassignedPriceDisplay();
+      this.initSBCQuickNav();
     },
 
     // 监听自动刷新
@@ -905,6 +1007,10 @@
       panel.appendChild(tabsContainer);
       panel.appendChild(headerRow);
       panel.appendChild(statsRow);
+
+      // SBC 快捷栏
+      const sbcQuickNav = this.renderSBCQuickNav();
+      if (sbcQuickNav) panel.appendChild(sbcQuickNav);
 
       // 球员列表容器
       const listContainer = document.createElement("div");
@@ -1985,8 +2091,7 @@
             fillRatings = this.calculateFillRatings(
               squadRequirements.minTeamRating,
               controller,
-              squadRequirements.minRarityGroup,
-              squadRequirements.minRareCount,
+              squadRequirements.rarityGroups,
               squadRequirements.ratingRanges
             );
             console.log("[EAFC Grinder] TEAM_RATING 计算结果:", fillRatings);
@@ -2050,16 +2155,256 @@
       }
     },
 
+    // ===================== SBC 快捷栏 =====================
+    initSBCQuickNav() {
+      const self = this;
+      this.loadSBCQuickNav();
+
+      if (typeof UTSBCHubView !== 'undefined' && UTSBCHubView.prototype.populateTiles) {
+        const originalPopulateTiles = UTSBCHubView.prototype.populateTiles;
+        UTSBCHubView.prototype.populateTiles = function(e, t) {
+          originalPopulateTiles.apply(this, arguments);
+          setTimeout(() => {
+            self._addQuickNavButtonsToSBCHub(this);
+          }, 100);
+        };
+        console.log("[EAFC Grinder] SBC 快捷栏已注册到 UTSBCHubView");
+      } else {
+        console.warn("[EAFC Grinder] UTSBCHubView 不可用，SBC 快捷栏未注册");
+      }
+    },
+
+    loadSBCQuickNav() {
+      try {
+        const raw = GM_getValue("eafc_grinder_sbc_quicknav", "[]");
+        const list = JSON.parse(raw);
+        if (Array.isArray(list)) {
+          this.sbcQuickNavList = list
+            .map(item => ({ id: Number(item.id), assetId: item.assetId }))
+            .slice(0, this.sbcQuickNavMaxCount);
+        }
+      } catch (e) {
+        this.sbcQuickNavList = [];
+      }
+    },
+
+    saveSBCQuickNav() {
+      GM_setValue("eafc_grinder_sbc_quicknav", JSON.stringify(this.sbcQuickNavList));
+    },
+
+    _addQuickNavButtonsToSBCHub(hubView) {
+      if (!hubView.sbcSetTiles) return;
+      hubView.sbcSetTiles.forEach(tile => {
+        const set = tile.data;
+        if (!set || !set.id) return;
+        const root = tile.__root || (tile.getRootElement && tile.getRootElement());
+        if (!root) return;
+        if (root.querySelector('.eafc-grinder-quicknav-btn')) return;
+
+        // 需要 tile 的父级有 position 才能让 absolute 定位生效
+        if (getComputedStyle(root).position === 'static') {
+          root.style.position = 'relative';
+        }
+
+        const btn = document.createElement('button');
+        btn.className = 'eafc-grinder-quicknav-btn';
+        btn.dataset.setId = set.id;
+        const isInNav = this.sbcQuickNavList.some(item => item.id === set.id);
+        btn.textContent = isInNav ? '从快捷栏去除' : '添加至快捷栏';
+        const stopEvt = (e) => { e.stopPropagation(); };
+        btn.addEventListener('mousedown', stopEvt);
+        btn.addEventListener('touchstart', stopEvt, { passive: false });
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          if (this.sbcQuickNavList.some(item => item.id === set.id)) {
+            this.removeFromSBCQuickNav(set.id);
+            btn.textContent = '添加至快捷栏';
+          } else {
+            this.addToSBCQuickNav(set.id, set.assetId);
+            console.log("[EAFC Grinder] SBC快捷栏 添加 set.id:", JSON.stringify(set.id), "类型:", typeof set.id, "Number:", Number(set.id), "assetId:", set.assetId);
+            btn.textContent = '从快捷栏去除';
+          }
+        });
+        root.appendChild(btn);
+      });
+    },
+
+    addToSBCQuickNav(setId, assetId) {
+      const numericId = Number(setId);
+      const idx = this.sbcQuickNavList.findIndex(item => item.id === numericId);
+      if (idx !== -1) {
+        this.sbcQuickNavList.splice(idx, 1);
+      }
+      this.sbcQuickNavList.unshift({ id: numericId, assetId: assetId });
+      if (this.sbcQuickNavList.length > this.sbcQuickNavMaxCount) {
+        this.sbcQuickNavList = this.sbcQuickNavList.slice(0, this.sbcQuickNavMaxCount);
+      }
+      this.saveSBCQuickNav();
+      this.updateSBCQuickNavButtons();
+      this.renderPanel();
+    },
+
+    removeFromSBCQuickNav(setId) {
+      const numericId = Number(setId);
+      this.sbcQuickNavList = this.sbcQuickNavList.filter(item => item.id !== numericId);
+      this.saveSBCQuickNav();
+      this.updateSBCQuickNavButtons();
+      this.renderPanel();
+    },
+
+    updateSBCQuickNavButtons() {
+      document.querySelectorAll('.eafc-grinder-quicknav-btn').forEach(btn => {
+        const setId = Number(btn.dataset.setId);
+        const isInNav = this.sbcQuickNavList.some(item => item.id === setId);
+        btn.textContent = isInNav ? '从快捷栏去除' : '添加至快捷栏';
+      });
+    },
+
+    renderSBCQuickNav() {
+      if (!this.sbcQuickNavList.length) return null;
+
+      const container = document.createElement('div');
+      container.className = 'grinder-sbc-quicknav';
+
+      const header = document.createElement('div');
+      header.className = 'grinder-sbc-quicknav-header';
+
+      const label = document.createElement('span');
+      label.textContent = 'SBC 快捷栏';
+      header.appendChild(label);
+
+      const deleteToggle = document.createElement('button');
+      deleteToggle.className = 'grinder-sbc-quicknav-delete-toggle' + (this.sbcQuickNavDeleteMode ? ' active' : '');
+      deleteToggle.textContent = this.sbcQuickNavDeleteMode ? '退出删除' : '删除模式';
+      deleteToggle.onclick = () => {
+        this.sbcQuickNavDeleteMode = !this.sbcQuickNavDeleteMode;
+        this.renderPanel();
+      };
+      header.appendChild(deleteToggle);
+      container.appendChild(header);
+
+      const iconsRow = document.createElement('div');
+      iconsRow.className = 'grinder-sbc-quicknav-icons';
+
+      this.sbcQuickNavList.forEach(item => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'grinder-sbc-quicknav-item' + (this.sbcQuickNavDeleteMode ? ' delete-mode' : '');
+        wrapper.title = '点击' + (this.sbcQuickNavDeleteMode ? '删除' : '跳转');
+
+        const img = document.createElement('img');
+        if (typeof AssetLocationUtils !== 'undefined' && AssetLocationUtils.getSquadBuildingSetImageUri) {
+          img.src = AssetLocationUtils.getSquadBuildingSetImageUri(item.assetId);
+        } else {
+          img.src = '';
+        }
+        img.alt = 'SBC';
+        img.onerror = () => { img.style.display = 'none'; };
+
+        wrapper.appendChild(img);
+        wrapper.onclick = () => {
+          if (this.sbcQuickNavDeleteMode) {
+            this.removeFromSBCQuickNav(item.id);
+          } else {
+            const tryGoToSBC = () => {
+              const set = services.SBC.repository.getSetById(Number(item.id));
+              if (set) {
+                this.goToSBC(set);
+              } else {
+                console.warn('[EAFC Grinder] 找不到 SBC，尝试加载SBC列表:', item.id);
+                const ctrl = _appMain?.getRootViewController?.();
+                if (ctrl) {
+                  services.SBC.requestSets().observe(ctrl, (e, t) => {
+                    e.unobserve(ctrl);
+                    if (t.success) {
+                      const set2 = services.SBC.repository.getSetById(Number(item.id));
+                      if (set2) {
+                        this.goToSBC(set2);
+                      } else {
+                        console.warn('[EAFC Grinder] 加载SBC列表后仍找不到 SBC:', item.id);
+                      }
+                    } else {
+                      console.warn('[EAFC Grinder] 加载SBC列表失败:', t.error || t.status);
+                    }
+                  });
+                }
+              }
+            };
+            tryGoToSBC();
+          }
+        };
+        iconsRow.appendChild(wrapper);
+      });
+
+      container.appendChild(iconsRow);
+      return container;
+    },
+
+    goToSBC(SBCSetEntity) {
+      try {
+        const controller = _appMain
+          ?._rootViewController
+          ?.currentController
+          ?.currentController
+          ?.currentController;
+        if (!controller) {
+          console.warn('[EAFC Grinder] 无法获取当前控制器');
+          return;
+        }
+        const view = controller.getView ? controller.getView() : null;
+        if (view) view.setInteractionState(false);
+
+        services.SBC.requestChallengesForSet(SBCSetEntity).observe(controller, (e, t) => {
+          e.unobserve(controller);
+          if (t.success && t.data.challenges.length > 0) {
+            if (SBCSetEntity.hidden) {
+              const r = t.data.challenges[0];
+              services.SBC.loadChallenge(r).observe(controller, (ee, tt) => {
+                ee.unobserve(controller);
+                if (tt.success) {
+                  const nav = controller.getNavigationController ? controller.getNavigationController() : null;
+                  if (nav) {
+                    if (!SBCSetEntity.getChallenge(r.id).squad) {
+                      SBCSetEntity.getChallenge(r.id).update(r);
+                    }
+                    const isMobile = (typeof isPhone === 'function' && isPhone());
+                    const o = isMobile ? new UTSBCSquadOverviewViewController() : new UTSBCSquadSplitViewController();
+                    o.initWithSBCSet(SBCSetEntity, r.id);
+                    nav.pushViewController(o);
+                  }
+                }
+                if (view) view.setInteractionState(true);
+              });
+            } else {
+              const nav = controller.getNavigationController ? controller.getNavigationController() : null;
+              if (nav) {
+                const isMobile = (typeof isPhone === 'function' && isPhone());
+                const o = isMobile ? new UTSBCChallengesViewController() : new UTSBCGroupChallengeSplitViewController();
+                o.initWithSBCSet(SBCSetEntity);
+                nav.pushViewController(o, true);
+                nav.setNavigationTitle(SBCSetEntity.name);
+              }
+              if (view) view.setInteractionState(true);
+            }
+          } else {
+            console.error('[EAFC Grinder] 获取 SBC challenges 失败:', t);
+            if (view) view.setInteractionState(true);
+          }
+        });
+      } catch (err) {
+        console.error('[EAFC Grinder] goToSBC 失败:', err);
+      }
+    },
+
     parseSBCRequirements(requirements) {
       const reqs = {
         minPlayers: 0,
         minRating: 0,
         maxRating: 999,
         minChemistry: 0,          // key 35: CHEMISTRY_POINTS
-        // 稀有度组：scope=0 至少, scope=1 至多, scope=2 恰好
-        minRareCount: 0,
-        minRarityGroup: null,     // key 25: rarityGroup 精确值
-        maxRareCount: 0,          // key 25 scope=1: 至多N名
+        // 稀有度组要求数组：[{groupId, minCount, maxCount}]
+        // scope=0 至少, scope=1 至多, scope=2 恰好
+        rarityGroups: [],
         // 阵容评分
         minTeamRating: 0,         // key 19: TEAM_RATING - 阵容平均评分下限
         // 全局卡片等级：scope=0 至少, scope=1 至多, scope=2 恰好
@@ -2186,16 +2531,26 @@
                 isGlobal = true;
                 break;
               case 25: // PLAYER_RARITY_GROUP: rarityGroup === firstValue 的球员
-                reqs.minRarityGroup = firstValue;
-                if (scope === 0) {
-                  reqs.minRareCount = count > 0 ? count : 1;
-                } else if (scope === 1) {
-                  reqs.maxRareCount = count > 0 ? count : 1;
-                } else if (scope === 2) {
-                  reqs.minRareCount = count > 0 ? count : 1;
-                  reqs.maxRareCount = count > 0 ? count : 1;
+                {
+                  const entry = { groupId: firstValue, minCount: 0, maxCount: 0 };
+                  if (scope === 0) {
+                    entry.minCount = count > 0 ? count : 1;
+                  } else if (scope === 1) {
+                    entry.maxCount = count > 0 ? count : 1;
+                  } else if (scope === 2) {
+                    entry.minCount = count > 0 ? count : 1;
+                    entry.maxCount = count > 0 ? count : 1;
+                  }
+                  // 如果已有同 groupId 的条目，合并 minCount/maxCount
+                  const existing = reqs.rarityGroups.find(g => g.groupId === firstValue);
+                  if (existing) {
+                    if (entry.minCount > 0) existing.minCount = entry.minCount;
+                    if (entry.maxCount > 0) existing.maxCount = entry.maxCount;
+                  } else {
+                    reqs.rarityGroups.push(entry);
+                  }
+                  isGlobal = true;
                 }
-                isGlobal = true;
                 break;
               case 26: // PLAYER_MIN_OVR
                 slot.min = firstValue;
@@ -2232,7 +2587,64 @@
           // 解析单条需求失败，跳过
         }
       });
-      console.log("[EAFC Grinder] SBC 需求:", reqs);
+      // 可读化输出 SBC 需求
+      {
+        const lines = ["[EAFC Grinder] SBC 需求解析结果:"];
+        if (reqs.minPlayers > 0) lines.push(`  球员总数: ${reqs.minPlayers}`);
+        if (reqs.minTeamRating > 0) lines.push(`  阵容评分: ≥${reqs.minTeamRating}`);
+        if (reqs.minChemistry > 0) lines.push(`  化学点数: ≥${reqs.minChemistry}`);
+        const qualityName = { 1: "铜", 2: "银", 3: "金" };
+        if (reqs.globalQualityMin > 0) lines.push(`  卡片等级: 至少${qualityName[reqs.globalQualityMin] || reqs.globalQualityMin}`);
+        if (reqs.globalQualityMax > 0) lines.push(`  卡片等级: 至多${qualityName[reqs.globalQualityMax] || reqs.globalQualityMax}`);
+        if (reqs.minRating > 0) lines.push(`  最低评分: ${reqs.minRating}`);
+        if (reqs.maxRating < 999) lines.push(`  最高评分: ${reqs.maxRating}`);
+        for (const rg of reqs.rarityGroups) {
+          let groupName = `groupId=${rg.groupId}`;
+          try { groupName = services.Localization.localize("Player_Group_" + rg.groupId) || groupName; } catch (e) {}
+          if (rg.minCount > 0 && rg.maxCount > 0 && rg.minCount === rg.maxCount) {
+            lines.push(`  稀有度组[${groupName}]: 恰好${rg.minCount}名`);
+          } else {
+            if (rg.minCount > 0) lines.push(`  稀有度组[${groupName}]: 至少${rg.minCount}名`);
+            if (rg.maxCount > 0) lines.push(`  稀有度组[${groupName}]: 至多${rg.maxCount}名`);
+          }
+        }
+        if (reqs.sameNationMin > 0) lines.push(`  同国籍: 至少${reqs.sameNationMin}名`);
+        if (reqs.sameNationMax > 0) lines.push(`  同国籍: 至多${reqs.sameNationMax}名`);
+        if (reqs.sameLeagueMin > 0) lines.push(`  同联赛: 至少${reqs.sameLeagueMin}名`);
+        if (reqs.sameLeagueMax > 0) lines.push(`  同联赛: 至多${reqs.sameLeagueMax}名`);
+        if (reqs.sameClubMin > 0) lines.push(`  同俱乐部: 至少${reqs.sameClubMin}名`);
+        if (reqs.sameClubMax > 0) lines.push(`  同俱乐部: 至多${reqs.sameClubMax}名`);
+        if (reqs.nationCountMin > 0) lines.push(`  不同国籍: 至少${reqs.nationCountMin}个`);
+        if (reqs.nationCountMax > 0) lines.push(`  不同国籍: 至多${reqs.nationCountMax}个`);
+        if (reqs.leagueCountMin > 0) lines.push(`  不同联赛: 至少${reqs.leagueCountMin}个`);
+        if (reqs.leagueCountMax > 0) lines.push(`  不同联赛: 至多${reqs.leagueCountMax}个`);
+        if (reqs.clubCountMin > 0) lines.push(`  不同俱乐部: 至少${reqs.clubCountMin}个`);
+        if (reqs.clubCountMax > 0) lines.push(`  不同俱乐部: 至多${reqs.clubCountMax}个`);
+        if (reqs.legendCountMin > 0) lines.push(`  传奇球员: 至少${reqs.legendCountMin}名`);
+        if (reqs.legendCountMax > 0) lines.push(`  传奇球员: 至多${reqs.legendCountMax}名`);
+        if (reqs.firstOwnerMin > 0) lines.push(`  首次拥有: 至少${reqs.firstOwnerMin}名`);
+        if (reqs.firstOwnerMax > 0) lines.push(`  首次拥有: 至多${reqs.firstOwnerMax}名`);
+        if (reqs.tradability !== null) lines.push(`  可交易: ${reqs.tradability ? '是' : '否'}`);
+        for (const range of reqs.ratingRanges) {
+          const parts = [];
+          if (range.quality) parts.push(qualityName[range.quality] || `品质${range.quality}`);
+          if (range.min > 0 && range.max < 999) parts.push(`评分${range.min}-${range.max}`);
+          else if (range.min > 0) parts.push(`评分≥${range.min}`);
+          else if (range.max < 999) parts.push(`评分≤${range.max}`);
+          if (range.exactRare != null) {
+            let rareName = `稀有度${range.exactRare}`;
+            try { rareName = services.Localization.localize("item.raretype" + range.exactRare); } catch (e) {}
+            parts.push(rareName);
+          }
+          if (range.leagues) parts.push(range.leagues.map(id => this.getLeagueName(id)).join("/"));
+          if (range.nations) parts.push(range.nations.map(id => this.getNationName(id)).join("/"));
+          if (range.clubs) parts.push(range.clubs.map(id => `俱乐部${id}`).join("/"));
+          const scopeLabel = range.scope === 1 ? "至多" : range.scope === 2 ? "恰好" : "至少";
+          lines.push(`  槽位[${parts.join(" + ") || "无限制"}]: ${scopeLabel}${range.count}名`);
+        }
+        console.log(lines.join("\n"));
+      }
+      console.log("[EAFC Grinder] SBC 需求(原始):", reqs);
       return reqs;
     },
 
@@ -2382,10 +2794,10 @@
         }
       }
 
-      // 第一步：满足 rarityGroup 需求
-      if (requirements.minRareCount > 0 && requirements.minRarityGroup !== null) {
-        const targetGroup = requirements.minRarityGroup;
-        const isInGroup = (p) => Array.isArray(p.groups) && p.groups.includes(targetGroup);
+      // 第一步：满足 rarityGroups 需求
+      for (const rg of requirements.rarityGroups) {
+        if (rg.minCount <= 0) continue;
+        const isInGroup = (p) => Array.isArray(p.groups) && p.groups.includes(rg.groupId);
 
         // 如果 calculateFillRatings 已经指定了最优的特殊卡，优先选它们
         const preferredDefIds = fillRatings && fillRatings._groupPlayerDefIds
@@ -2397,7 +2809,7 @@
         // 先选指定的
         if (preferredDefIds) {
           for (const p of sortedPlayers) {
-            if (picked >= requirements.minRareCount) break;
+            if (picked >= rg.minCount) break;
             if (!canPick(p)) continue;
             if (!isInGroup(p)) continue;
             if (!preferredDefIds.has(p.definitionId)) continue;
@@ -2408,14 +2820,14 @@
 
         // 不足时再从剩余满足 group 的里补
         for (const p of sortedPlayers) {
-          if (picked >= requirements.minRareCount) break;
+          if (picked >= rg.minCount) break;
           if (!canPick(p)) continue;
           if (!isInGroup(p)) continue;
           pick(p);
           picked++;
         }
-        if (picked < requirements.minRareCount) {
-          throw new Error("库存中找不到足够满足稀有度组要求的球员，需要 " + requirements.minRareCount + " 张");
+        if (picked < rg.minCount) {
+          throw new Error("库存中找不到足够满足稀有度组(groupId=" + rg.groupId + ")要求的球员，需要 " + rg.minCount + " 张");
         }
       }
 
@@ -2579,13 +2991,13 @@
         }
 
         // 稀有度组数量
-        if (requirements.minRarityGroup !== null) {
-          const groupCount = squadPlayers.filter(p => Array.isArray(p.groups) && p.groups.includes(requirements.minRarityGroup)).length;
-          if (requirements.minRareCount > 0 && groupCount < requirements.minRareCount) {
-            errors.push(`稀有度组球员至少${requirements.minRareCount}名，当前${groupCount}名`);
+        for (const rg of requirements.rarityGroups) {
+          const groupCount = squadPlayers.filter(p => Array.isArray(p.groups) && p.groups.includes(rg.groupId)).length;
+          if (rg.minCount > 0 && groupCount < rg.minCount) {
+            errors.push(`稀有度组(groupId=${rg.groupId})球员至少${rg.minCount}名，当前${groupCount}名`);
           }
-          if (requirements.maxRareCount > 0 && groupCount > requirements.maxRareCount) {
-            errors.push(`稀有度组球员至多${requirements.maxRareCount}名，当前${groupCount}名`);
+          if (rg.maxCount > 0 && groupCount > rg.maxCount) {
+            errors.push(`稀有度组(groupId=${rg.groupId})球员至多${rg.maxCount}名，当前${groupCount}名`);
           }
         }
 
@@ -2924,10 +3336,10 @@
       if (requirements.minChemistry > 0 && chemistry < requirements.minChemistry) return { valid: false };
 
       // 稀有度组人数检查
-      if (requirements.minRarityGroup !== null) {
-        const groupCount = squad.filter(p => p.groups && p.groups.includes(requirements.minRarityGroup)).length;
-        if (requirements.minRareCount > 0 && groupCount < requirements.minRareCount) return { valid: false };
-        if (requirements.maxRareCount > 0 && groupCount > requirements.maxRareCount) return { valid: false };
+      for (const rg of requirements.rarityGroups) {
+        const groupCount = squad.filter(p => p.groups && p.groups.includes(rg.groupId)).length;
+        if (rg.minCount > 0 && groupCount < rg.minCount) return { valid: false };
+        if (rg.maxCount > 0 && groupCount > rg.maxCount) return { valid: false };
       }
 
       // 同俱乐部数量
@@ -3003,10 +3415,12 @@
       const doPick = (p) => { squad.push(p); usedIds.add(this._chemPid(p)); };
 
       // 第 1 步：优先满足稀有度组约束
-      if (requirements.minRareCount > 0 && requirements.minRarityGroup !== null) {
-        const rarePool = pool.filter(p => canPick(p) && p.groups && p.groups.includes(requirements.minRarityGroup));
+      for (const rg of requirements.rarityGroups) {
+        if (rg.minCount <= 0) continue;
+        const rarePool = pool.filter(p => canPick(p) && p.groups && p.groups.includes(rg.groupId));
         const sortedRares = sortFn(rarePool, squad);
-        for (let i = 0; squad.length < requirements.minRareCount && i < sortedRares.length; i++) {
+        const startLen = squad.length;
+        for (let i = 0; squad.length < startLen + rg.minCount && i < sortedRares.length; i++) {
           doPick(sortedRares[i]);
         }
       }
@@ -3322,8 +3736,10 @@
       }
 
       // 稀有组策略
-      if (requirements.minRareCount > 0 && requirements.minRarityGroup != null) {
-        dynamicStrategies.rarityGroup = this._makeRarityGroupStrategy(requirements.minRarityGroup);
+      const rgWithMin = requirements.rarityGroups.filter(g => g.minCount > 0);
+      if (rgWithMin.length > 0) {
+        // 如果有多个 rarityGroup，用第一个作为主策略（通常只有一个）
+        dynamicStrategies.rarityGroup = this._makeRarityGroupStrategy(rgWithMin[0].groupId);
         dynamicStrategyNames.push('rarityGroup');
       }
 
@@ -3335,7 +3751,7 @@
       if (requirements.clubCountMin > 0) compositeWeights.push({ field: 'teamId', diversity: true, weight: 2 });
       if (requirements.nationCountMin > 0) compositeWeights.push({ field: 'nationId', diversity: true, weight: 2 });
       if (requirements.leagueCountMin > 0) compositeWeights.push({ field: 'leagueId', diversity: true, weight: 2 });
-      if (requirements.minRareCount > 0 && requirements.minRarityGroup != null) compositeWeights.push({ rarityGroup: requirements.minRarityGroup, weight: 2 });
+      for (const rg of rgWithMin) compositeWeights.push({ rarityGroup: rg.groupId, weight: 2 });
       if (requirements.sameClubMax > 0) compositeWeights.push({ field: 'teamId', maxCap: requirements.sameClubMax, weight: 3 });
       if (requirements.sameNationMax > 0) compositeWeights.push({ field: 'nationId', maxCap: requirements.sameNationMax, weight: 3 });
       if (requirements.sameLeagueMax > 0) compositeWeights.push({ field: 'leagueId', maxCap: requirements.sameLeagueMax, weight: 3 });
@@ -3529,8 +3945,8 @@
     },
 
     // 计算满足阵容评分要求的最优填充评分列表
-    // rarityGroup / rarityCount 可选，有 rarityGroup 要求时联合优化
-    calculateFillRatings(targetRating, controller, rarityGroup, rarityCount, ratingRanges) {
+    // rarityGroups 可选，有稀有度组要求时联合优化
+    calculateFillRatings(targetRating, controller, rarityGroups, ratingRanges) {
       const cachedCount = Object.values(this.priceCacheMap).filter(v => v > 0).length;
       if (cachedCount === 0) {
         throw new Error("价格数据尚未加载，请稍后再试");
@@ -3707,14 +4123,16 @@
         }
       }
 
-      // === 生成 rarityGroup 的特殊卡组合 ===
+      // === 生成 rarityGroups 的特殊卡组合 ===
+      // 对每个有 minCount 要求的 rarityGroup，枚举球员组合，然后叉积合并
+      const rgEntries = (rarityGroups || []).filter(g => g.minCount > 0);
       let groupPlans = [{ players: [], ratings: [], cost: 0 }];
-      if (rarityGroup && rarityCount > 0) {
+      for (const rg of rgEntries) {
         const groupPlayers = uniquePlayers.filter(p =>
-          Array.isArray(p.groups) && p.groups.includes(rarityGroup)
+          Array.isArray(p.groups) && p.groups.includes(rg.groupId)
         );
-        if (groupPlayers.length < rarityCount) {
-          throw new Error("库存中满足稀有度组要求的球员不足，需要 " + rarityCount + " 张，只有 " + groupPlayers.length + " 张");
+        if (groupPlayers.length < rg.minCount) {
+          throw new Error("库存中满足稀有度组(groupId=" + rg.groupId + ")要求的球员不足，需要 " + rg.minCount + " 张，只有 " + groupPlayers.length + " 张");
         }
         const seenDef = new Set();
         const uniqueGroupPlayers = groupPlayers.filter(p => {
@@ -3724,12 +4142,23 @@
           if (!price) return false;
           return true;
         });
-        const combos = this._multicombinations(uniqueGroupPlayers, rarityCount);
-        groupPlans = combos.map(combo => ({
-          players: combo,
-          ratings: combo.map(p => p.rating),
-          cost: combo.reduce((sum, p) => sum + (this.priceCacheMap[p.definitionId] || 0), 0)
-        }));
+        const combos = this._multicombinations(uniqueGroupPlayers, rg.minCount);
+        const newGroupPlans = [];
+        for (const plan of groupPlans) {
+          for (const combo of combos) {
+            // 避免重复选同一球员
+            if (plan.players.some(pp => combo.some(c => c.id === pp.id))) continue;
+            newGroupPlans.push({
+              players: [...plan.players, ...combo],
+              ratings: [...plan.ratings, ...combo.map(p => p.rating)],
+              cost: plan.cost + combo.reduce((sum, p) => sum + (this.priceCacheMap[p.definitionId] || 0), 0)
+            });
+          }
+        }
+        groupPlans = newGroupPlans;
+        if (groupPlans.length === 0) {
+          throw new Error("库存中无法同时满足多个稀有度组要求");
+        }
       }
 
       // === 枚举所有组合，找总成本最低且达标的方案 ===
@@ -3777,7 +4206,7 @@
         ...bestOverall.groupPlan.ratings,
         ...bestOverall.normalRatings
       ];
-      result._slotPlayerIds = bestOverall.slotPlan.players.map(p => p.id);
+      result._slotPlayerIds = [...bestOverall.slotPlan.players, ...bestOverall.groupPlan.players].map(p => p.id);
       result._groupPlayerDefIds = bestOverall.groupPlan.players.map(p => p.definitionId);
       return result;
     },

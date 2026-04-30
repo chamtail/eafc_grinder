@@ -2023,8 +2023,8 @@
           console.log("[EAFC Grinder] challenge metadata:", controller._challenge);
         } catch(e) {}
 
-        // === 当存在化学要求时，跳过 calculateFillRatings，直接走化学感知求解器 ===
-        if (squadRequirements.minChemistry > 0) {
+        // === 统一走化学感知求解器（确保硬约束如 nationCountMax 等在选人阶段被遵守） ===
+        if (true || squadRequirements.minChemistry > 0) {
           console.log("[EAFC Grinder] >>> 化学感知求解器分支");
 
           // 显示加载遮盖（与球员数据加载风格一致）
@@ -2660,8 +2660,8 @@
     },
 
     filterEligiblePlayers(requirements) {
-      // 合并俱乐部和仓库的球员
-      let eligible = [...this.getClubPlayers(), ...this.getStoragePlayers()];
+      // 合并仓库和俱乐部的球员（仓库在前，同 metaDataId 时仓库卡优先被选中）
+      let eligible = [...this.getStoragePlayers(), ...this.getClubPlayers()];
 
       // 去重（按 id）
       const seenIds = new Set();
@@ -3176,6 +3176,53 @@
       };
     },
 
+    // 仓库球员优先策略：仓库卡优先，同属性时评分低优先
+    _makeStoragePriorityStrategy() {
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          if (a.isStorage !== b.isStorage) return a.isStorage ? -1 : 1;
+          if (a.rating <= 83 !== b.rating <= 83) return a.rating <= 83 ? -1 : 1;
+          return a.rating - b.rating;
+        });
+      };
+    },
+
+    // 仓库普金优先策略：仓库普金(rareflag=0, rating>=75)最优先，其次仓库其他，同属性时评分低优先
+    _makeStorageCommonGoldStrategy() {
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          const aCG = a.isStorage && a.rareflag === 0 && a.rating >= 75 ? 2 : a.isStorage ? 1 : 0;
+          const bCG = b.isStorage && b.rareflag === 0 && b.rating >= 75 ? 2 : b.isStorage ? 1 : 0;
+          if (aCG !== bCG) return bCG - aCG;
+          return a.rating - b.rating;
+        });
+      };
+    },
+
+    // 仓库稀有金优先策略：仓库稀有金(rareflag=1, rating>=75)最优先，其次仓库其他，同属性时评分低优先
+    _makeStorageRareGoldStrategy() {
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          const aRG = a.isStorage && a.rareflag === 1 && a.rating >= 75 ? 2 : a.isStorage ? 1 : 0;
+          const bRG = b.isStorage && b.rareflag === 1 && b.rating >= 75 ? 2 : b.isStorage ? 1 : 0;
+          if (aRG !== bRG) return bRG - aRG;
+          return a.rating - b.rating;
+        });
+      };
+    },
+
+    // 仓库83及以下稀有金优先策略：仓库稀有金(rareflag=1, 75<=rating<=83)最优先，其次仓库其他，同属性时评分低优先
+    _makeStorageRareGold83Strategy() {
+      return (players, squad) => {
+        return [...players].sort((a, b) => {
+          const aRG = a.isStorage && a.rareflag === 1 && a.rating >= 75 && a.rating <= 83 ? 2 : a.isStorage ? 1 : 0;
+          const bRG = b.isStorage && b.rareflag === 1 && b.rating >= 75 && b.rating <= 83 ? 2 : b.isStorage ? 1 : 0;
+          if (aRG !== bRG) return bRG - aRG;
+          return a.rating - b.rating;
+        });
+      };
+    },
+
     _makeTargetAffinityStrategy(field, targetIds) {
       const idSet = new Set(targetIds);
       return (players, squad) => {
@@ -3298,10 +3345,10 @@
               .filter(arr => arr.length >= requirements.sameClubMin)
               .sort((a, b) => b[0].rating - a[0].rating)[0];
             if (bestClub) {
-              const bestClubIds = new Set(bestClub.map(p => this._chemPid(p)));
+              const bestClubIds = new Set(bestClub.map(p => p.id));
               return [...players].sort((a, b) => {
-                const aIn = bestClubIds.has(this._chemPid(a)) ? 1 : 0;
-                const bIn = bestClubIds.has(this._chemPid(b)) ? 1 : 0;
+                const aIn = bestClubIds.has(a.id) ? 1 : 0;
+                const bIn = bestClubIds.has(b.id) ? 1 : 0;
                 if (aIn !== bIn) return bIn - aIn;
                 return b.rating - a.rating;
               });
@@ -3386,11 +3433,17 @@
 
     // ========== 化学感知阵容求解器 ==========
 
-    // 球员ID生成
-    _chemPid(p) { return p.metaDataId || (p.name + '|' + p.teamId); },
-
-    // 球员价格（用于化学求解器内部排序）
-    _chemPrice(p) { return this.getPlayerPrice(p); },
+    // 球员综合成本（用于化学求解器内部排序）
+    // 优先级：不可交易 > 价格低 > 低稀有度 > 仓库 > 评分低
+    // 仓库83及以下金卡价格打8折
+    _chemPrice(p) {
+      let price = this.getPlayerPrice(p);
+      if (p.isStorage && p.rating >= 75 && p.rating <= 83) price = Math.round(price * 0.8);
+      const tradablePenalty = p.tradable ? 1 : 0;     // 不可交易优先
+      const rarePenalty = p.rareflag || 0;             // 低稀有度优先
+      const storageBonus = p.isStorage ? 0 : 1;        // 仓库优先
+      return tradablePenalty * 1e15 + price * 1e7 + rarePenalty * 1e5 + storageBonus * 1e3 + p.rating;
+    },
 
     // 检查球员是否匹配某个 ratingRange 条件
     _playerMatchesRange(p, range) {
@@ -3447,6 +3500,13 @@
     _evaluateSquad(squad, requirements, formationPositions) {
       const squadSize = requirements.minPlayers || 11;
       if (squad.length !== squadSize) return { valid: false, reason: `人数${squad.length}≠${squadSize}` };
+
+      // 同 metaDataId 不能重复出现在阵容中（同一球员的不同实例）
+      const seenMetaIds = new Set();
+      for (const p of squad) {
+        if (p.metaDataId && seenMetaIds.has(p.metaDataId)) return { valid: false, reason: `metaDataId重复(${p.metaDataId})` };
+        seenMetaIds.add(p.metaDataId);
+      }
 
       const { assignment, correctPlayers, matchPos } = this._maxMatching(squad, formationPositions);
       const chemistry = this._calcChemistryForCorrectPlayers(correctPlayers);
@@ -3534,32 +3594,45 @@
       const usedIds = new Set();
       const squad = [];
 
-      const canPick = (p) => !usedIds.has(this._chemPid(p));
-      const doPick = (p) => { squad.push(p); usedIds.add(this._chemPid(p)); };
+      const canPick = (p) => !usedIds.has(p.id);
 
-      // 硬约束检查：选该球员后是否违反 sameXxxMax 限制
-      const wouldViolateCap = (p) => {
-        const checkCap = (field, maxCount) => {
-          if (maxCount <= 0) return false;
-          let count = 0;
-          for (const sp of squad) { if (sp[field] === p[field]) count++; }
-          return count >= maxCount;
+      // 检查阵容是否违反 cap 约束
+      const squadCapViolated = (s) => {
+        const countBy = (field) => {
+          const g = {};
+          for (const p of s) g[p[field]] = (g[p[field]] || 0) + 1;
+          return g;
         };
-        if (checkCap('teamId', requirements.sameClubMax)) return true;
-        if (checkCap('nationId', requirements.sameNationMax)) return true;
-        if (checkCap('leagueId', requirements.sameLeagueMax)) return true;
-
-        // 去重上限：新增不同值会导致超出 xxxCountMax
-        const checkDistinctCap = (field, maxDistinct) => {
-          if (maxDistinct <= 0) return false;
-          const existing = new Set(squad.map(sp => sp[field]));
-          return !existing.has(p[field]) && existing.size >= maxDistinct;
-        };
-        if (checkDistinctCap('nationId', requirements.nationCountMax)) return true;
-        if (checkDistinctCap('leagueId', requirements.leagueCountMax)) return true;
-        if (checkDistinctCap('teamId', requirements.clubCountMax)) return true;
-
+        const maxOf = (field) => Math.max(...Object.values(countBy(field)), 0);
+        const distinctOf = (field) => Object.keys(countBy(field)).length;
+        if (requirements.sameClubMax > 0 && maxOf('teamId') > requirements.sameClubMax) return true;
+        if (requirements.sameNationMax > 0 && maxOf('nationId') > requirements.sameNationMax) return true;
+        if (requirements.sameLeagueMax > 0 && maxOf('leagueId') > requirements.sameLeagueMax) return true;
+        if (requirements.nationCountMax > 0 && distinctOf('nationId') > requirements.nationCountMax) return true;
+        if (requirements.leagueCountMax > 0 && distinctOf('leagueId') > requirements.leagueCountMax) return true;
+        if (requirements.clubCountMax > 0 && distinctOf('teamId') > requirements.clubCountMax) return true;
         return false;
+      };
+
+      // 硬约束检查：添加该球员后是否违反 cap（用于正常选人流程）
+      const wouldViolateCap = (p) => squadCapViolated([...squad, p]);
+
+      // 选人：同 metaDataId 时若新卡更便宜且不违反约束则替换，否则跳过
+      const doPick = (p) => {
+        if (p.metaDataId) {
+          const dupIdx = squad.findIndex(sp => sp.metaDataId === p.metaDataId);
+          if (dupIdx >= 0) {
+            if (this._chemPrice(p) >= this._chemPrice(squad[dupIdx])) return false;
+            const testSquad = [...squad];
+            testSquad.splice(dupIdx, 1, p);
+            if (squadCapViolated(testSquad)) return false;
+            usedIds.delete(squad[dupIdx].id);
+            squad.splice(dupIdx, 1);
+          }
+        }
+        squad.push(p);
+        usedIds.add(p.id);
+        return true;
       };
 
       // 诊断辅助：输出阵容球员列表
@@ -3588,9 +3661,10 @@
         let picked = 0;
         let skipped = 0;
         for (let i = 0; picked < rg.minCount && i < sortedRares.length; i++) {
+          if (!canPick(sortedRares[i])) { skipped++; continue; }
           if (wouldViolateCap(sortedRares[i])) { skipped++; continue; }
-          doPick(sortedRares[i]);
-          picked++;
+          if (doPick(sortedRares[i])) picked++;
+          else skipped++;
         }
       }
 
@@ -3643,7 +3717,7 @@
         if (candidates.length === 0) break;
 
         const sorted = sortFn(candidates, squad);
-        doPick(sorted[0]);
+        if (!doPick(sorted[0])) break;
         mostNeeded.stillNeed--;
         totalNeed--;
 
@@ -3662,7 +3736,7 @@
         if (remaining.length === 0) break;
 
         const sorted = sortFn(remaining, squad);
-        doPick(sorted[0]);
+        if (!doPick(sorted[0])) break;
       }
       const ev = this._evaluateSquad(squad, requirements, formationPositions);
       if (!ev.valid) {
@@ -3684,14 +3758,14 @@
         iterations++;
 
         const currentPrice = squad.reduce((s, p) => s + this._chemPrice(p), 0);
-        const squadIds = new Set(squad.map(p => this._chemPid(p)));
+        const squadIds = new Set(squad.map(p => p.id));
 
         const order = squad.map((p, i) => ({ idx: i, price: this._chemPrice(p) }))
                            .sort((a, b) => b.price - a.price);
 
         for (const { idx } of order) {
           const candidates = this._chemPool.filter(p => {
-            if (squadIds.has(this._chemPid(p))) return false;
+            if (squadIds.has(p.id)) return false;
             if (this._chemPrice(p) >= this._chemPrice(squad[idx])) return false;
             return true;
           }).sort((a, b) => this._chemPrice(a) - this._chemPrice(b));
@@ -3726,11 +3800,14 @@
       const newSquad = [...squad];
 
       if (mode === 'swap') {
+        if (n < 2) return newSquad;
         const i = Math.floor(Math.random() * n);
         const j = (i + 1 + Math.floor(Math.random() * (n - 1))) % n;
         [newSquad[i], newSquad[j]] = [newSquad[j], newSquad[i]];
         return newSquad;
       }
+
+      k = Math.min(k, n);
 
       const idxPool = Array.from({ length: n }, (_, i) => i);
       for (let i = 0; i < k; i++) {
@@ -3738,12 +3815,12 @@
         [idxPool[i], idxPool[j]] = [idxPool[j], idxPool[i]];
       }
 
-      const squadIds = new Set(squad.map(p => this._chemPid(p)));
+      const squadIds = new Set(squad.map(p => p.id));
 
       for (let i = 0; i < k; i++) {
         const idx = idxPool[i];
         const oldPrice = this._chemPrice(newSquad[idx]);
-        const notInSquad = this._chemPool.filter(p => !squadIds.has(this._chemPid(p)));
+        const notInSquad = this._chemPool.filter(p => !squadIds.has(p.id));
         if (notInSquad.length === 0) break;
 
         const cheaper = notInSquad.filter(p => this._chemPrice(p) < oldPrice);
@@ -3754,8 +3831,8 @@
           cand = notInSquad[Math.floor(Math.random() * notInSquad.length)];
         }
 
-        squadIds.delete(this._chemPid(newSquad[idx]));
-        squadIds.add(this._chemPid(cand));
+        squadIds.delete(newSquad[idx].id);
+        squadIds.add(cand.id);
         newSquad[idx] = cand;
       }
 
@@ -3853,6 +3930,10 @@
 
       // 构建候选池（已由 filterEligiblePlayers 预过滤）
       this._chemPool = eligiblePlayers;
+      const squadSize = requirements.minPlayers || 11;
+      if (eligiblePlayers.length < squadSize) {
+        throw new Error(`满足SBC要求的候选球员人数不足（${eligiblePlayers.length}人，需要${squadSize}人）`);
+      }
       console.log("[EAFC Grinder] 化学求解器-候选池:", eligiblePlayers.length, "阵型位置:", formationPositions);
 
       // 注册动态策略
@@ -3954,6 +4035,16 @@
       // 化学最大化策略：用 lb/nb/cb 断点估算边际化学贡献，同时考虑硬约束
       dynamicStrategies.chemistryMax = this._makeChemistryMaxStrategy(requirements);
       dynamicStrategyNames.push('chemistryMax');
+
+      // 仓库球员优先策略
+      dynamicStrategies.storagePriority = this._makeStoragePriorityStrategy();
+      dynamicStrategyNames.push('storagePriority');
+      dynamicStrategies.storageCommonGold = this._makeStorageCommonGoldStrategy();
+      dynamicStrategyNames.push('storageCommonGold');
+      dynamicStrategies.storageRareGold = this._makeStorageRareGoldStrategy();
+      dynamicStrategyNames.push('storageRareGold');
+      dynamicStrategies.storageRareGold83 = this._makeStorageRareGold83Strategy();
+      dynamicStrategyNames.push('storageRareGold83');
 
       // 按候选池联赛人数取前5，每个联赛建一个亲和策略
       const poolLeagueCounts = {};

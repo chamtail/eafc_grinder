@@ -3674,41 +3674,35 @@
       // 诊断辅助：输出阵容球员列表
       const diagSquad = () => squad.map(p => `${p.name}(${p.rating})`).join(", ");
 
-      // 第 1 步：优先满足稀有度组约束（优先选与策略目标联赛/国籍一致的球员）
+      // 第 1 步：MRV 约束满足——统一处理稀有度组和 ratingRanges 槽位约束
+      // 收集所有硬约束，按候选池大小排序，候选最少的先满足，每选一人后扣除其他约束
+
+      // 约束匹配函数：判断球员是否满足某个约束
+      const playerMatchesConstraint = (p, c) => {
+        if (c.type === 'rarityGroup') {
+          return p.groups && p.groups.includes(c.groupId);
+        }
+        // ratingRange
+        if (p.rating < c.minR || p.rating > c.maxR) return false;
+        if (c.exactRare != null && p.rareflag !== c.exactRare) return false;
+        if (c.leagues && !c.leagues.includes(p.leagueId)) return false;
+        if (c.nations && !c.nations.includes(p.nationId)) return false;
+        if (c.clubs && !c.clubs.includes(p.teamId)) return false;
+        return true;
+      };
+
+      // 收集约束
+      const constraints = [];
+
       for (const rg of requirements.rarityGroups) {
         if (rg.minCount <= 0) continue;
-        const rarePool = pool.filter(p => canPick(p) && p.groups && p.groups.includes(rg.groupId));
-        // 先用 sortFn 排序，再按策略亲和度微调：与策略目标同联赛/国籍的优先
-        const sortedRares = sortFn(rarePool, squad);
-        const strategyTargetLeagues = sortFn._targetLeagues || [];
-        const strategyTargetNations = sortFn._targetNations || [];
-        const strategyTargetClubs = sortFn._targetClubs || [];
-        if (strategyTargetLeagues.length > 0 || strategyTargetNations.length > 0 || strategyTargetClubs.length > 0) {
-          const targetLeagueSet = new Set(strategyTargetLeagues);
-          const targetNationSet = new Set(strategyTargetNations);
-          const targetClubSet = new Set(strategyTargetClubs);
-          sortedRares.sort((a, b) => {
-            const aScore = (targetLeagueSet.has(a.leagueId) ? 2 : 0) + (targetNationSet.has(a.nationId) ? 1 : 0) + (targetClubSet.has(a.teamId) ? 2 : 0);
-            const bScore = (targetLeagueSet.has(b.leagueId) ? 2 : 0) + (targetNationSet.has(b.nationId) ? 1 : 0) + (targetClubSet.has(b.teamId) ? 2 : 0);
-            if (aScore !== bScore) return bScore - aScore;
-            return 0; // 保持 sortFn 原顺序
-          });
-        }
-        let picked = 0;
-        let skipped = 0;
-        for (let i = 0; picked < rg.minCount && i < sortedRares.length; i++) {
-          if (!canPick(sortedRares[i])) { skipped++; continue; }
-          if (wouldViolateCap(sortedRares[i])) { skipped++; continue; }
-          if (doPick(sortedRares[i])) picked++;
-          else skipped++;
-        }
+        constraints.push({ type: 'rarityGroup', groupId: rg.groupId, stillNeed: rg.minCount });
       }
 
-      // 第 1.5 步：逐个选人满足 ratingRanges 中 scope!=1 的硬性槽位约束
-      // 每选一人后重排序，让化学感知策略能基于已选球员做决策
       const hardRanges = (requirements.ratingRanges || []).filter(r => r.scope !== 1);
-      const rangeNeeds = hardRanges.map(range => {
+      for (const range of hardRanges) {
         const needed = range.count || 0;
+        if (needed <= 0) continue;
         let minR = range.min || 0;
         let maxR = range.max || 999;
         if (range.quality) {
@@ -3719,52 +3713,80 @@
             [minR, maxR] = qrm[range.quality] || [0, 99];
           }
         }
-        return { range, needed, minR, maxR, stillNeed: 0 };
-      });
-
-      const playerMatchesRange = (p, r) => {
-        if (p.rating < r.minR || p.rating > r.maxR) return false;
-        if (r.range.exactRare != null && p.rareflag !== r.range.exactRare) return false;
-        if (r.range.leagues && !r.range.leagues.includes(p.leagueId)) return false;
-        if (r.range.nations && !r.range.nations.includes(p.nationId)) return false;
-        if (r.range.clubs && !r.range.clubs.includes(p.teamId)) return false;
-        return true;
-      };
-
-      // 扣除已在阵容中满足该 range 的球员
-      for (const rn of rangeNeeds) {
-        const currentMatches = squad.filter(p => playerMatchesRange(p, rn)).length;
-        rn.stillNeed = Math.max(0, rn.needed - currentMatches);
+        constraints.push({
+          type: 'ratingRange', range, stillNeed: needed,
+          minR, maxR, exactRare: range.exactRare,
+          leagues: range.leagues, nations: range.nations, clubs: range.clubs
+        });
       }
-      let totalNeed = rangeNeeds.reduce((s, r) => s + r.stillNeed, 0);
+
+      // 计算每个约束的候选池大小
+      const updateConstraintPool = (c) => {
+        c.poolSize = pool.filter(p => canPick(p) && !wouldViolateCap(p) && playerMatchesConstraint(p, c)).length;
+      };
+      for (const c of constraints) updateConstraintPool(c);
+
+      // MRV：按候选池大小排序，候选最少的约束优先
+      constraints.sort((a, b) => a.poolSize - b.poolSize);
+
+      // 策略亲和度辅助
+      const strategyTargetLeagues = sortFn._targetLeagues || [];
+      const strategyTargetNations = sortFn._targetNations || [];
+      const strategyTargetClubs = sortFn._targetClubs || [];
+
+      let totalNeed = constraints.reduce((s, c) => s + c.stillNeed, 0);
 
       while (totalNeed > 0 && squad.length < squadSize) {
-        // 找还缺人最多的 range
-        const mostNeeded = rangeNeeds.filter(r => r.stillNeed > 0)
-          .sort((a, b) => b.stillNeed - a.stillNeed)[0];
-        if (!mostNeeded) break;
+        // 重新计算候选池并排序
+        for (const c of constraints) updateConstraintPool(c);
+        constraints.sort((a, b) => a.poolSize - b.poolSize);
+
+        // 找 stillNeed > 0 的第一个约束（候选池最小的）
+        const target = constraints.find(c => c.stillNeed > 0);
+        if (!target) break;
 
         const candidates = pool.filter(p => {
           if (!canPick(p)) return false;
-          if (!playerMatchesRange(p, mostNeeded)) return false;
           if (wouldViolateCap(p)) return false;
+          if (!playerMatchesConstraint(p, target)) return false;
           return true;
         });
         if (candidates.length === 0) break;
 
-        const sorted = sortFn(candidates, squad);
-        if (!doPick(sorted[0])) break;
-        mostNeeded.stillNeed--;
-        totalNeed--;
+        // 用策略排序，再按策略亲和度微调
+        let sorted = sortFn(candidates, squad);
+        if (strategyTargetLeagues.length > 0 || strategyTargetNations.length > 0 || strategyTargetClubs.length > 0) {
+          const targetLeagueSet = new Set(strategyTargetLeagues);
+          const targetNationSet = new Set(strategyTargetNations);
+          const targetClubSet = new Set(strategyTargetClubs);
+          sorted.sort((a, b) => {
+            const aScore = (targetLeagueSet.has(a.leagueId) ? 2 : 0) + (targetNationSet.has(a.nationId) ? 1 : 0) + (targetClubSet.has(a.teamId) ? 2 : 0);
+            const bScore = (targetLeagueSet.has(b.leagueId) ? 2 : 0) + (targetNationSet.has(b.nationId) ? 1 : 0) + (targetClubSet.has(b.teamId) ? 2 : 0);
+            if (aScore !== bScore) return bScore - aScore;
+            return this._chemPrice(a) - this._chemPrice(b); // 同策略价值下优先选价格低的
+          });
+        }
 
-        // 新选的球员可能也满足其他 range
-        for (const rn of rangeNeeds) {
-          if (rn === mostNeeded || rn.stillNeed <= 0) continue;
-          if (playerMatchesRange(sorted[0], rn)) {
-            rn.stillNeed--;
+        let picked = false;
+        for (const p of sorted) {
+          if (!canPick(p)) continue;
+          if (wouldViolateCap(p)) continue;
+          if (doPick(p)) {
+            picked = true;
+            target.stillNeed--;
             totalNeed--;
+            // 扣除：新选的球员可能也满足其他约束
+            for (const c of constraints) {
+              if (c === target || c.stillNeed <= 0) continue;
+              if (playerMatchesConstraint(p, c)) {
+                c.stillNeed--;
+                totalNeed--;
+              }
+            }
+            break;
           }
         }
+        if (!picked) break; // 无法满足当前约束
       }
       // 第 2 步：贪心填充剩余位置
       while (squad.length < squadSize) {

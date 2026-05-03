@@ -42,6 +42,8 @@
     sbcQuickNavList: [], // SBC快捷栏列表 [{id, assetId}]
     sbcQuickNavDeleteMode: false, // SBC快捷栏删除模式
     sbcQuickNavMaxCount: 5, // SBC快捷栏最大数量
+    sbcSetsMap: {}, // 初始化加载的 SBC set 数据缓存: id -> set
+    sbcSetsLoaded: false, // 是否已完成初始化加载
     priceMap: null,
     priceCacheMap: {},  // 统一价格缓存：definitionId -> price（所有卡）
     _fetchingDefIds: new Set(),
@@ -2195,6 +2197,7 @@
     initSBCQuickNav() {
       const self = this;
       this.loadSBCQuickNav();
+      this._loadSBCSets();
 
       if (typeof UTSBCHubView !== 'undefined' && UTSBCHubView.prototype.populateTiles) {
         const originalPopulateTiles = UTSBCHubView.prototype.populateTiles;
@@ -2208,6 +2211,43 @@
       } else {
         console.warn("[EAFC Grinder] UTSBCHubView 不可用，SBC 快捷栏未注册");
       }
+    },
+
+    _loadSBCSets() {
+      const self = this;
+      const tryLoad = () => {
+        const ctrl = _appMain?.getRootViewController?.();
+        if (!ctrl || !services.SBC || !services.SBC.requestSets) {
+          setTimeout(tryLoad, 2000);
+          return;
+        }
+        services.SBC.requestSets().observe(ctrl, (e, t) => {
+          e.unobserve(ctrl);
+          if (t.success) {
+            const sets = t.data && t.data.sets ? t.data.sets : [];
+            self.sbcSetsMap = {};
+            sets.forEach(set => {
+              if (set && set.id != null) {
+                self.sbcSetsMap[Number(set.id)] = set;
+              }
+            });
+            self.sbcSetsLoaded = true;
+
+            // 过滤掉快捷栏中已经不存在的 SBC
+            const beforeCount = self.sbcQuickNavList.length;
+            self.sbcQuickNavList = self.sbcQuickNavList.filter(item => self.sbcSetsMap[item.id]);
+            if (self.sbcQuickNavList.length !== beforeCount) {
+              self.saveSBCQuickNav();
+            }
+
+            self.renderPanel();
+            console.log("[EAFC Grinder] SBC 列表初始化加载完成，共", sets.length, "个");
+          } else {
+            console.warn('[EAFC Grinder] 初始化加载SBC列表失败:', t.error || t.status);
+          }
+        });
+      };
+      tryLoad();
     },
 
     loadSBCQuickNav() {
@@ -2228,11 +2268,34 @@
       GM_setValue("eafc_grinder_sbc_quicknav", JSON.stringify(this.sbcQuickNavList));
     },
 
+    _isSBCMaxedOut(set) {
+      if (!set) return false;
+      return (
+        typeof set.repeats === 'number' &&
+        typeof set.timesCompleted === 'number' &&
+        set.repeats > 0 &&
+        set.timesCompleted >= set.repeats
+      );
+    },
+
     _addQuickNavButtonsToSBCHub(hubView) {
       if (!hubView.sbcSetTiles) return;
+      let needRender = false;
       hubView.sbcSetTiles.forEach(tile => {
         const set = tile.data;
         if (!set || !set.id) return;
+
+        // 用 tile 上的最新数据更新缓存
+        const numericId = Number(set.id);
+        this.sbcSetsMap[numericId] = set;
+        this.sbcSetsLoaded = true;
+
+        // 检查快捷栏中该 SBC 是否次数已达上限，需要隐藏
+        const inNav = this.sbcQuickNavList.find(item => item.id === numericId);
+        if (inNav && this._isSBCMaxedOut(set)) {
+          needRender = true;
+        }
+
         const root = tile.__root || (tile.getRootElement && tile.getRootElement());
         if (!root) return;
         if (root.querySelector('.eafc-grinder-quicknav-btn')) return;
@@ -2258,12 +2321,14 @@
             btn.textContent = '添加至快捷栏';
           } else {
             this.addToSBCQuickNav(set.id, set.assetId);
-            console.log("[EAFC Grinder] SBC快捷栏 添加 set.id:", JSON.stringify(set.id), "类型:", typeof set.id, "Number:", Number(set.id), "assetId:", set.assetId);
             btn.textContent = '从快捷栏去除';
           }
         });
         root.appendChild(btn);
       });
+      if (needRender) {
+        this.renderPanel();
+      }
     },
 
     addToSBCQuickNav(setId, assetId) {
@@ -2320,10 +2385,29 @@
       header.appendChild(deleteToggle);
       container.appendChild(header);
 
+      // 尚未加载完成时显示加载占位，避免先渲染全部再隐藏造成闪烁
+      if (!this.sbcSetsLoaded) {
+        const loadingRow = document.createElement('div');
+        loadingRow.className = 'grinder-sbc-quicknav-icons';
+        loadingRow.style.cssText = 'font-size:12px;color:#888;padding:4px 0;';
+        loadingRow.textContent = 'SBC 数据加载中...';
+        container.appendChild(loadingRow);
+        return container;
+      }
+
+      // 过滤掉 repeats === timesCompleted 的项
+      const visibleItems = this.sbcQuickNavList.filter(item => {
+        const set = this.sbcSetsMap[item.id];
+        if (!set) return false; // 已经不存在的直接不显示
+        if (this._isSBCMaxedOut(set)) return false; // 次数已达上限，隐藏
+        return true;
+      });
+      if (!visibleItems.length) return null;
+
       const iconsRow = document.createElement('div');
       iconsRow.className = 'grinder-sbc-quicknav-icons';
 
-      this.sbcQuickNavList.forEach(item => {
+      visibleItems.forEach(item => {
         const wrapper = document.createElement('div');
         wrapper.className = 'grinder-sbc-quicknav-item' + (this.sbcQuickNavDeleteMode ? ' delete-mode' : '');
         wrapper.title = '点击' + (this.sbcQuickNavDeleteMode ? '删除' : '跳转');
@@ -2342,31 +2426,12 @@
           if (this.sbcQuickNavDeleteMode) {
             this.removeFromSBCQuickNav(item.id);
           } else {
-            const tryGoToSBC = () => {
-              const set = services.SBC.repository.getSetById(Number(item.id));
-              if (set) {
-                this.goToSBC(set);
-              } else {
-                console.warn('[EAFC Grinder] 找不到 SBC，尝试加载SBC列表:', item.id);
-                const ctrl = _appMain?.getRootViewController?.();
-                if (ctrl) {
-                  services.SBC.requestSets().observe(ctrl, (e, t) => {
-                    e.unobserve(ctrl);
-                    if (t.success) {
-                      const set2 = services.SBC.repository.getSetById(Number(item.id));
-                      if (set2) {
-                        this.goToSBC(set2);
-                      } else {
-                        console.warn('[EAFC Grinder] 加载SBC列表后仍找不到 SBC:', item.id);
-                      }
-                    } else {
-                      console.warn('[EAFC Grinder] 加载SBC列表失败:', t.error || t.status);
-                    }
-                  });
-                }
-              }
-            };
-            tryGoToSBC();
+            const set = services.SBC.repository.getSetById(Number(item.id));
+            if (set) {
+              this.goToSBC(set);
+            } else {
+              console.warn('[EAFC Grinder] 找不到 SBC:', item.id);
+            }
           }
         };
         iconsRow.appendChild(wrapper);
@@ -3810,30 +3875,44 @@
       let improved = true;
       let iterations = 0;
       const maxIterations = 500;
+      let tFilter = 0, tSort = 0, tEval = 0, tPrice = 0;
+      let evalCount = 0;
 
       while (improved && iterations < maxIterations) {
         improved = false;
         iterations++;
 
+        let t0 = performance.now();
         const currentPrice = squad.reduce((s, p) => s + this._chemPrice(p), 0);
         const squadIds = new Set(squad.map(p => p.id));
-
         const order = squad.map((p, i) => ({ idx: i, price: this._chemPrice(p) }))
                            .sort((a, b) => b.price - a.price);
+        tPrice += performance.now() - t0;
 
         for (const { idx } of order) {
+          t0 = performance.now();
           const candidates = this._chemPool.filter(p => {
             if (squadIds.has(p.id)) return false;
             if (this._chemPrice(p) >= this._chemPrice(squad[idx])) return false;
             return true;
-          }).sort((a, b) => this._chemPrice(a) - this._chemPrice(b));
+          });
+          tFilter += performance.now() - t0;
+
+          t0 = performance.now();
+          candidates.sort((a, b) => this._chemPrice(a) - this._chemPrice(b));
+          tSort += performance.now() - t0;
 
           for (const cand of candidates.slice(0, 30)) {
             const newSquad = [...squad];
             newSquad[idx] = cand;
+            t0 = performance.now();
             const ev = this._evaluateSquad(newSquad, requirements, formationPositions);
+            tEval += performance.now() - t0;
+            evalCount++;
             if (ev.valid) {
+              let t1 = performance.now();
               const newPrice = newSquad.reduce((s, p) => s + this._chemPrice(p), 0);
+              tPrice += performance.now() - t1;
               if (newPrice < currentPrice) {
                 squad = newSquad;
                 assignment = ev.assignment;
@@ -3848,7 +3927,9 @@
         }
       }
 
-      console.log("[EAFC Grinder] 化学求解器-局部搜索迭代次数:", iterations);
+      console.log("[EAFC Grinder] 化学求解器-局部搜索迭代次数:", iterations,
+        "耗时(ms): 筛选", tFilter.toFixed(1), "排序", tSort.toFixed(1), "评估", tEval.toFixed(1), "价格计算", tPrice.toFixed(1),
+        "评估次数", evalCount);
       return { squad, assignment, correctPlayers, chemistry };
     },
 
@@ -3899,6 +3980,10 @@
 
     // 模拟退火
     _chemSimulatedAnnealing(initialSquad, requirements, formationPositions) {
+      let tPerturb = 0, tEval = 0, tPrice = 0;
+      let evalCount = 0;
+      const saStart = performance.now();
+
       let currentSquad = [...initialSquad];
       let ev = this._evaluateSquad(currentSquad, requirements, formationPositions);
       let currentAssignment = ev.assignment;
@@ -3934,6 +4019,7 @@
       let accepted = 0;
       let improved = 0;
       let validCount = 0;
+      let lastImproveIter = 0;
 
       for (let iter = 0; iter < maxIter && T > Tmin; iter++) {
         const mode = Math.random() < 0.7 ? 'replace' : 'swap';
@@ -3942,12 +4028,20 @@
           k = T > avgDelta ? (Math.random() < 0.5 ? 2 : 3) : 1;
         }
 
+        let t0 = performance.now();
         const newSquad = this._chemPerturb(currentSquad, k, mode);
+        tPerturb += performance.now() - t0;
+
+        t0 = performance.now();
         const newEv = this._evaluateSquad(newSquad, requirements, formationPositions);
+        tEval += performance.now() - t0;
+        evalCount++;
 
         if (newEv.valid) {
           validCount++;
+          let t1 = performance.now();
           const newPrice = newSquad.reduce((s, p) => s + this._chemPrice(p), 0);
+          tPrice += performance.now() - t1;
           const delta = newPrice - currentPrice;
 
           if (delta < 0 || Math.random() < Math.exp(-delta / T)) {
@@ -3965,6 +4059,7 @@
               bestChemistry = newEv.chemistry;
               bestPrice = newPrice;
               improved++;
+              lastImproveIter = iter;
             }
           }
         }
@@ -3972,7 +4067,10 @@
         T *= alpha;
       }
 
-      console.log("[EAFC Grinder] 化学求解器-SA 迭代:", maxIter, "有效:", validCount, "接受:", accepted, "改进:", improved, "最优:", bestPrice.toLocaleString());
+      const saTotal = performance.now() - saStart;
+      console.log("[EAFC Grinder] 化学求解器-SA 迭代:", maxIter, "有效:", validCount, "接受:", accepted, "改进:", improved, "最后改进迭代:", lastImproveIter, "最优:", bestPrice.toLocaleString(),
+        "总耗时(ms):", saTotal.toFixed(1), "扰动", tPerturb.toFixed(1), "评估", tEval.toFixed(1), "价格计算", tPrice.toFixed(1),
+        "评估次数", evalCount);
       return { squad: bestSquad, assignment: bestAssignment, correctPlayers: bestCorrectPlayers, chemistry: bestChemistry };
     },
 
@@ -4741,6 +4839,9 @@
 
               self._setInteractionState();
               console.log("[EAFC Grinder] 阵容保存流程完成");
+
+              // SBC 保存成功后刷新 SBC 列表，及时更新快捷栏显示状态
+              self._loadSBCSets();
             } catch (saveErr) {
               console.warn("[EAFC Grinder] 处理保存结果时出错:", saveErr);
             }
